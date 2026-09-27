@@ -1,0 +1,16 @@
+{
+  "name": "coolbrador",
+  "private": true,
+  "description": "Coolbrador: static HTML/JS social site on Firebase Hosting, Auth and Firestore.",
+  "scripts": {
+    "dev": "node tools/dev.mjs",
+    "serve": "node tools/dev-server.mjs",
+    "emulators": "firebase emulators:start --project demo-coolbrador --only auth,firestore,storage",
+    "test": "firebase emulators:exec --project demo-coolbrador --only firestore,storage \"node --test tests/\""
+  },
+  "devDependencies": {
+    "@firebase/rules-unit-testing": "3.0.4",
+    "firebase": "10.14.1",
+    "firebase-tools": "15.31.0"
+  }
+}

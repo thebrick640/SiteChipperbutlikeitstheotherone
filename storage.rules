@@ -1,0 +1,9 @@
+rules_version = '2';
+// Locked down until media uploads move to Cloud Storage.
+service firebase.storage {
+  match /b/{bucket}/o {
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}
