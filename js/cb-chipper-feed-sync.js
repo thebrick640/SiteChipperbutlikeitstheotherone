@@ -279,13 +279,10 @@
       localStorage.setItem(MIRROR_KEY, JSON.stringify(feed));
       localStorage.setItem(BOARD_MIRROR_KEY, JSON.stringify(boardDoc));
     } catch (e) {}
-    if (opts.immediate) {
-      schedulePush(0);
-    } else if (opts.skipPush) {
-      /* LS mirror only */
-    } else {
-      schedulePush(DEBOUNCE_MS);
-    }
+    // Anonymous visitors used to push their whole local board to the shared
+    // chipper/feed doc here (last writer wins). Publishing is now an explicit,
+    // authenticated moderator action; only an opts.immediate caller pushes.
+    if (opts.immediate) schedulePush(0);
     return feed;
   }
 
