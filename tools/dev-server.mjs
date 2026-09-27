@@ -102,9 +102,9 @@ function sendFile(res, file, status = 200) {
   const headers = { "Content-Type": type, "Cache-Control": "no-store" };
   if (ext === ".html" && EMULATORS) {
     let html = fs.readFileSync(file, "utf8");
+    // Full documents only; header/footer fragments are inserted via innerHTML.
     const m = /<head[^>]*>/i.exec(html);
-    html = m ? html.slice(0, m.index + m[0].length) + EMULATOR_SNIPPET() + html.slice(m.index + m[0].length)
-      : EMULATOR_SNIPPET() + html;
+    if (m) html = html.slice(0, m.index + m[0].length) + EMULATOR_SNIPPET() + html.slice(m.index + m[0].length);
     res.writeHead(status, headers);
     res.end(html);
     return;

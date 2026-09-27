@@ -210,6 +210,18 @@
   var authLoading = true;
   var authListeners = [];
 
+  // Shared Firestore data layer (js/cb-cloud.js). Page scripts await
+  // window.CBCloudReady instead of importing it themselves.
+  function loadCloud() {
+    if (!window.CBCloudReady) {
+      window.CBCloudReady = import("/js/cb-cloud.js").then(function (m) { return m.default; });
+    }
+    return window.CBCloudReady;
+  }
+  loadCloud().catch(function (err) {
+    console.warn("[cb] cloud data layer failed to load", err);
+  });
+
   function whenAuthReady(fn) {
     if (authReady) {
       try { fn(); } catch (_) {}
@@ -828,18 +840,16 @@
       alert("Hang on, finishing sign-in.");
       return false;
     }
-    alert("Log in to " + (what || "do that") + ".");
+    if (confirm("Log in to " + (what || "do that") + "?")) {
+      location.href = "/login.html?next=" + encodeURIComponent(location.pathname + location.search);
+    }
     return false;
   }
 
   async function signOutFully() {
     try {
-      const mod = await import("/js/firebase.js");
-      const auth = mod.auth;
-      if (auth) {
-        const { signOut } = await import("https://www.gstatic.com/firebasejs/10.14.1/firebase-auth.js");
-        await signOut(auth);
-      }
+      const cloud = await loadCloud();
+      await cloud.signOut();
     } catch (_) {}
     clearLocalSession();
     clearAuthChromeCache();
@@ -1576,8 +1586,8 @@ function wireRightRail() {
     authLoading = true;
     authReady = false;
     try {
-      const mod = await import("/js/firebase.js");
-      const auth = mod.auth;
+      const cloud = await loadCloud();
+      const auth = cloud.auth;
       if (auth) {
         window.CoolbradorAuth = auth;
         const apply = async (user) => {
@@ -1600,80 +1610,24 @@ function wireRightRail() {
             markAuthReady();
             return;
           }
-          localStorage.setItem("loggedIn", "true");
-          localStorage.setItem("firebaseUid", user.uid);
-          const username = user.displayName || (user.email && user.email.split("@")[0]) || "User";
-          let pfp = user.photoURL || "/users/default/pfp.jpg";
-          if (!pfp || (pfp.includes("googleusercontent.com") && pfp.length < 50)) pfp = "/users/default/pfp.jpg";
-          let profileId = localStorage.getItem("currentUserId") || "";
-          if (profileId === user.uid) profileId = "";
-          if (!profileId) {
-            try {
-              const fs = await import("https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore.js");
-              const db = fs.getFirestore();
-              const q = fs.query(fs.collection(db, "profiles"), fs.where("uid", "==", user.uid));
-              const snap = await fs.getDocs(q);
-              if (!snap.empty) {
-                profileId = snap.docs[0].id;
-                localStorage.setItem("currentUserId", profileId);
-                localStorage.setItem("loggedIn", "true");
-                localStorage.setItem("firebaseUid", user.uid);
-                const existing = JSON.parse(localStorage.getItem("user_" + profileId) || "{}");
-                existing.username = existing.username || username;
-                existing.profilePicture = existing.profilePicture || pfp;
-                existing.uid = user.uid;
-                localStorage.setItem("user_" + profileId, JSON.stringify(existing));
-                if (existing.profilePicture) {
-                  localStorage.setItem("pfp_" + profileId, existing.profilePicture);
-                  pfp = existing.profilePicture;
-                }
-              }
-            } catch (_) {}
-          } else {
-            localStorage.setItem("currentUserId", profileId);
-            try {
-              const existing = JSON.parse(localStorage.getItem("user_" + profileId) || "{}");
-              if (existing.profilePicture) pfp = existing.profilePicture;
-            } catch (_) {}
+          // One global identity: Firestore users/{uid} with a counter-allocated
+          // public id. Never invent per-browser ids (everyone used to be /users/0).
+          let account = null;
+          try {
+            account = await cloud.syncSession(user);
+          } catch (err) {
+            console.warn("[cb] could not load your account", err && (err.code || err.message));
           }
-          if (profileId && isDemoAccountId(String(profileId))) {
-            profileId = "";
+          if (!account) {
+            renderLoginLinks();
+            markAuthReady();
+            return;
           }
-          if (!profileId || profileId === "me" || profileId === user.uid || !/^\d+$/.test(String(profileId))) {
-            profileId = allocatePublicUserId();
-            localStorage.setItem("currentUserId", profileId);
-            try {
-              const existing = JSON.parse(localStorage.getItem("user_" + profileId) || "{}");
-              existing.username = existing.username || username;
-              existing.displayName = existing.displayName || existing.username || username;
-              existing.profilePicture = existing.profilePicture || pfp;
-              existing.uid = user.uid;
-              localStorage.setItem("user_" + profileId, JSON.stringify(existing));
-              if (existing.profilePicture) localStorage.setItem("pfp_" + profileId, existing.profilePicture);
-              var prof = JSON.parse(localStorage.getItem("profile_" + profileId) || "null") || {};
-              prof.id = profileId;
-              prof.displayName = existing.displayName;
-              prof.handle = prof.handle || String(existing.displayName || "lab").toLowerCase().replace(/[^a-z0-9_]/g, "").slice(0, 24);
-              prof.avatar = existing.profilePicture || pfp;
-              localStorage.setItem("profile_" + profileId, JSON.stringify(prof));
-            } catch (_) {}
-          }
-          try { profileId = ensureSessionNotDemo() || profileId; } catch (_) {}
+          const profileId = String(account.publicId);
+          const username = account.username || "Labrador";
+          const pfp = account.avatar || "/users/default/pfp.jpg";
           const profileUrl = "/users/" + encodeURIComponent(profileId);
           let displayName = username;
-          try {
-            const existing = JSON.parse(localStorage.getItem("user_" + profileId) || "{}");
-            const prof = JSON.parse(localStorage.getItem("profile_" + profileId) || "null") || {};
-            displayName = prof.displayName || existing.displayName || existing.username || username;
-            // Never show a demo roster name for a real signed-in Labrador.
-            if (existing.demo || prof.demo) {
-              delete existing.demo;
-              delete prof.demo;
-              existing.uid = existing.uid || user.uid;
-              localStorage.setItem("user_" + profileId, JSON.stringify(existing));
-              localStorage.setItem("profile_" + profileId, JSON.stringify(prof));
-            }
-          } catch (_) {}
           renderSignedInChrome({
             id: profileId,
             username: displayName,

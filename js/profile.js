@@ -153,7 +153,19 @@
     return "";
   }
 
+  function showProfileNotFound(raw) {
+    var root = document.getElementById("profileRoot");
+    if (!root) return;
+    document.title = "Profile not found - Coolbrador";
+    root.innerHTML =
+      '<div class="cb-profile-missing" style="max-width:520px;margin:64px auto;text-align:center;padding:32px">' +
+      '<h1 style="margin-bottom:8px">No Labrador here</h1>' +
+      '<p style="opacity:.8">We couldn\'t find a profile for <strong>' + escapeHtml(String(raw || "")) + '</strong>.</p>' +
+      '<p><a href="/community.html">Back to Community</a></p></div>';
+  }
+
   function toast(msg) {
+    if (msg == null) return;
     try {
       if (window.CoolbradorPosts && typeof window.CoolbradorPosts.showToast === "function") {
         window.CoolbradorPosts.showToast(msg);
@@ -481,6 +493,14 @@
     } catch (e3) {}
   }
 
+  // Persists the signed-in user's own profile to Firestore so everyone sees it.
+  function saveProfileToCloud(profile) {
+    if (!window.CBCloudReady) return Promise.reject(new Error("offline"));
+    return window.CBCloudReady.then(function (cloud) {
+      return cloud.saveMyProfile(profile);
+    });
+  }
+
   function countActivity(userId) {
     var posts = 0, yeahs = 0;
     for (var i = 0; i < localStorage.length; i++) {
@@ -754,19 +774,19 @@
     if (!sessionPublicId && currentUserId && /^\d+$/.test(String(currentUserId))) {
       sessionPublicId = String(currentUserId);
     }
-    // Migrate legacy "me" session to numeric public id
-    if (loggedIn && (!sessionPublicId || currentUserId === "me")) {
-      try {
-        if (window.CoolbradorLayout && typeof window.CoolbradorLayout.allocatePublicUserId === "function") {
-          sessionPublicId = window.CoolbradorLayout.allocatePublicUserId();
-        } else {
-          sessionPublicId = "0";
-        }
-        localStorage.setItem("currentUserId", sessionPublicId);
-        currentUserId = sessionPublicId;
-      } catch (e2) {}
-    }
     var routeRaw = route.id || qs("id") || "";
+    // /users/<handle> resolves through Firestore; never fall back to your own profile.
+    if (routeRaw && !/^\d+$/.test(String(routeRaw)) && String(routeRaw).toLowerCase() !== "me" && !resolvePublicId(routeRaw)) {
+      if (window.CBCloudReady) {
+        window.CBCloudReady.then(function (cloud) { return cloud.getProfileByHandle(routeRaw); }).then(function (p) {
+          if (p && p.publicId) location.replace("/users/" + encodeURIComponent(p.publicId) + (route.layout && route.layout !== "profile" ? "/" + route.layout : ""));
+          else showProfileNotFound(routeRaw);
+        }).catch(function () { showProfileNotFound(routeRaw); });
+      } else {
+        showProfileNotFound(routeRaw);
+      }
+      return;
+    }
     // Never keep /users/me in the address bar
     if (String(routeRaw).toLowerCase() === "me" && sessionPublicId) {
       var dest = "/users/" + encodeURIComponent(sessionPublicId);
@@ -805,6 +825,23 @@
     var activeLayout = route.layout || profile.layoutPreset || "profile";
     if (activeLayout !== "profile" && activeLayout !== "card" && activeLayout !== "links") activeLayout = "profile";
     var feedTab = "posts";
+
+    // Refresh real (non-mascot) profiles from Firestore after the cached first paint.
+    if (viewId && Number(viewId) >= 100 && window.CBCloudReady) {
+      window.CBCloudReady.then(function (cloud) {
+        return cloud.getProfileByPublicId(viewId, { fresh: true });
+      }).then(function (p) {
+        if (!p) {
+          if (!isOwn) showProfileNotFound(viewId);
+          return;
+        }
+        if (profileDraft) return;
+        profile = loadProfile(viewId);
+        try { paint(); } catch (_) {}
+      }).catch(function (err) {
+        console.warn("[profile] cloud refresh failed", err && (err.code || err.message));
+      });
+    }
 
     function setText(id, value) {
       var el = document.getElementById(id);
@@ -1089,7 +1126,18 @@
       profileSavedSnapshot = cloneProfile(profile);
       showProfileSaveBar(false);
       try { paint(); } catch (_) {}
-      try { toast("Saved"); } catch (_) {}
+      try { toast("Saving..."); } catch (_) {}
+      saveProfileToCloud(profile).then(function (saved) {
+        if (saved && String(saved.publicId) === String(profile.id)) {
+          profile = loadProfile(profile.id);
+          profileSavedSnapshot = cloneProfile(profile);
+          try { paint(); } catch (_) {}
+        }
+        try { toast("Saved"); } catch (_) {}
+      }).catch(function (err) {
+        console.warn("[profile] save failed", err);
+        try { toast("Couldn't save to your account: " + ((err && (err.code || err.message)) || "error")); } catch (_) {}
+      });
     }
 
 

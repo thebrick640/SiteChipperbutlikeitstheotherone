@@ -4,7 +4,7 @@
   <link rel="icon" href="/img/favicon3.ico" type="image/x-icon">
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Stupid Login Page</title>
+  <title>Log in - Coolbrador</title>
   <link rel="stylesheet" href="styles-login.css">
   <script>
     (function () {
@@ -30,7 +30,7 @@
         var wall = localStorage.getItem("cb_wallpaper");
         if (wall) {
           document.documentElement.classList.add("cb-has-wallpaper");
-          document.documentElement.style.setProperty("--cb-wallpaper", 'url("' + wall.replace(/\/g, "\\").replace(/"/g, '\"') + '")');
+          document.documentElement.style.setProperty("--cb-wallpaper", 'url("' + wall.replace(/\\/g, "\\\\").replace(/"/g, '\\"') + '")');
           document.documentElement.style.setProperty("--cb-wallpaper-tint", (localStorage.getItem("cb_wallpaper_tint") || "55") + "%");
           document.documentElement.style.setProperty("--cb-wallpaper-blur", (localStorage.getItem("cb_wallpaper_blur") || "0") + "px");
         }
@@ -52,20 +52,21 @@
     <div id="loginForm" class="form active">
       <label class="field-label" for="loginUsername">Email</label>
       <input type="email" id="loginUsername" placeholder="Email" autocomplete="email">
-      <input type="password" id="loginPassword" placeholder="Password">
+      <input type="password" id="loginPassword" placeholder="Password" autocomplete="current-password">
       <div class="extra">
-        <label><input type="checkbox"> Remember me</label>
-        <span style="cursor:pointer;color:var(--cb-accent);">Forgot password?</span>
+        <label><input type="checkbox" id="rememberMe" checked> Remember me</label>
+        <button type="button" id="forgotPassword" class="linklike" style="cursor:pointer;color:var(--cb-accent);background:none;border:0;padding:0;font:inherit;">Forgot password?</button>
       </div>
-      <button id="loginButton">Log In</button>
+      <button id="loginButton" type="button">Log In</button>
     </div>
 
     <!-- Signup Form -->
     <div id="signupForm" class="form">
-      <input type="text" id="signupUsername" placeholder="Username">
-      <input type="email" id="signupEmail" placeholder="Email">
-      <input type="password" id="signupPassword" placeholder="Password">
-      <button id="signupButton">Create Account</button>
+      <input type="text" id="signupUsername" placeholder="Display name" maxlength="40" autocomplete="nickname">
+      <input type="text" id="signupHandle" placeholder="@handle (letters, numbers, _)" maxlength="25" autocomplete="username" spellcheck="false">
+      <input type="email" id="signupEmail" placeholder="Email" autocomplete="email">
+      <input type="password" id="signupPassword" placeholder="Password (6+ characters)" autocomplete="new-password">
+      <button id="signupButton" type="button">Create Account</button>
     </div>
 
     <!-- Toggle link -->
@@ -85,311 +86,191 @@
   <!-- ---------------------------------------------- -->
   <script type="module">
     import { auth } from './js/firebase.js';
+    import cloud from './js/cb-cloud.js';
     import {
       signInWithEmailAndPassword,
       createUserWithEmailAndPassword,
       updateProfile,
+      sendPasswordResetEmail,
+      sendEmailVerification,
+      setPersistence,
+      browserLocalPersistence,
+      browserSessionPersistence,
       RecaptchaVerifier,
-      multiFactor,
       PhoneAuthProvider,
       PhoneMultiFactorGenerator,
       getMultiFactorResolver
     } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-auth.js";
-    import {
-      getFirestore,
-      doc,
-      getDoc,
-      setDoc,
-      collection,
-      query,
-      where,
-      getDocs,
-      runTransaction
-    } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore.js";
 
-    console.log("login.html - Firebase module loaded");
-    console.log("login.html - Initial auth.currentUser:", auth.currentUser);
-
-    const db = getFirestore();
-    let recaptchaVerifier = null;
     let isLogin = true;
-
-    // --- Helper ---------------------------------------
-    function rememberLocalSession(profileId, user, username) {
-      if (profileId == null || profileId === "") return;
-      const id = String(profileId);
-      localStorage.setItem("loggedIn", "true");
-      localStorage.setItem("currentUserId", id);
-      localStorage.setItem("firebaseUid", user && user.uid ? user.uid : "");
-      const existing = JSON.parse(localStorage.getItem("user_" + id) || "{}");
-      existing.username = username || existing.username || (user && (user.displayName || (user.email && user.email.split("@")[0]))) || "User";
-      existing.displayName = existing.username;
-      existing.email = (user && user.email) || existing.email || "";
-      existing.uid = (user && user.uid) || existing.uid || "";
-      existing.profilePicture = existing.profilePicture || (user && user.photoURL) || "/users/default/pfp.jpg";
-      existing.joined = existing.joined || Date.now();
-      localStorage.setItem("user_" + id, JSON.stringify(existing));
-      localStorage.setItem("pfp_" + id, existing.profilePicture);
-      const profile = JSON.parse(localStorage.getItem("profile_" + id) || "{}");
-      profile.id = id;
-      profile.displayName = existing.username;
-      profile.handle = String(existing.username || "user").toLowerCase().replace(/\s+/g, "");
-      profile.bio = profile.bio || existing.bio || "";
-      profile.about = profile.about || existing.about || "Member of the Coolbrador cosmos.";
-      profile.avatar = existing.profilePicture;
-      profile.joined = existing.joined;
-      if (!Array.isArray(profile.sections)) profile.sections = profile.sections || [];
-      localStorage.setItem("profile_" + id, JSON.stringify(profile));
-    }
-
+    let busy = false;
+    let recaptchaVerifier = null;
 
     function showMessage(text, color = "#aaa") {
-      const result = document.getElementById('result');
-      result.innerHTML = text;
+      const result = document.getElementById("result");
+      result.textContent = text;
       result.style.color = color;
     }
 
-    // --- Setup reCAPTCHA ------------------------------
-    async function initRecaptcha() {
-      if (recaptchaVerifier) return;
-      recaptchaVerifier = new RecaptchaVerifier(auth, 'recaptcha-container', {
-        size: 'invisible',
-        callback: () => {},
-        'expired-callback': () => {}
+    // Only same-site paths, so ?next= cannot redirect off Coolbrador.
+    function nextUrl() {
+      const n = new URLSearchParams(location.search).get("next") || "";
+      return /^\/(?!\/)[^\s]*$/.test(n) && !/^\/login/.test(n) ? n : "/";
+    }
+
+    function setBusy(on) {
+      busy = on;
+      ["loginButton", "signupButton"].forEach((id) => {
+        const b = document.getElementById(id);
+        if (b) b.disabled = on;
       });
-      await recaptchaVerifier.render();
     }
 
-    // --- SIGNUP ---------------------------------------
+    async function finishSignIn(user, opts) {
+      await cloud.syncSession(user, opts);
+      showMessage("Welcome to Coolbrador!", "#a6e3a1");
+      setTimeout(() => { window.location.href = nextUrl(); }, 400);
+    }
+
+    function friendlyAuthError(err, fallback) {
+      switch (err && err.code) {
+        case "auth/email-already-in-use": return "That email already has an account. Try logging in.";
+        case "auth/invalid-email": return "That email address looks invalid.";
+        case "auth/weak-password": return "Password must be at least 6 characters.";
+        case "auth/user-not-found": return "No account found for that email.";
+        case "auth/wrong-password":
+        case "auth/invalid-credential":
+        case "auth/invalid-login-credentials": return "Wrong email or password.";
+        case "auth/too-many-requests": return "Too many attempts. Try again in a bit.";
+        case "auth/user-disabled": return "This account is disabled.";
+        case "auth/network-request-failed": return "Network error. Check your connection.";
+        case "permission-denied": return "Your account could not be set up (permission denied).";
+        default: return fallback;
+      }
+    }
+
+    async function applyPersistence() {
+      const remember = document.getElementById("rememberMe");
+      await setPersistence(auth, remember && !remember.checked ? browserSessionPersistence : browserLocalPersistence);
+    }
+
+    // --- SIGNUP: create the auth user first, then the profile transaction ---
     async function signup() {
-      const username = document.getElementById('signupUsername').value.trim();
-      const email    = document.getElementById('signupEmail').value.trim();
-      const password = document.getElementById('signupPassword').value;
+      if (busy) return;
+      const username = document.getElementById("signupUsername").value.trim();
+      const handleRaw = document.getElementById("signupHandle").value.trim().replace(/^@/, "");
+      const email = document.getElementById("signupEmail").value.trim();
+      const password = document.getElementById("signupPassword").value;
 
-      if (!username || !email || !password) return showMessage("Fill all fields", "#ff5555");
-      if (password.length < 6) return showMessage("Password >= 6 characters", "#ff5555");
+      if (!username || !email || !password) return showMessage("Fill in your name, email and password.", "#ff5555");
+      if (password.length < 6) return showMessage("Password must be at least 6 characters.", "#ff5555");
+      const handle = cloud.normalizeHandle(handleRaw || username);
+      if (handleRaw && handle !== handleRaw.toLowerCase()) {
+        return showMessage("Handles use 3-24 letters, numbers or underscores. Try @" + handle, "#ff5555");
+      }
 
+      setBusy(true);
+      showMessage("Creating your account...");
       try {
-        // 1. Atomically get and increment the next ID
-        const counterRef = doc(db, "counters", "users");
-        const newId = await runTransaction(db, async (transaction) => {
-          const counterDoc = await transaction.get(counterRef);
-          let currentNextId = counterDoc.exists() ? counterDoc.data().nextId : 0;
-          transaction.set(counterRef, { nextId: currentNextId + 1 }, { merge: true });
-          return currentNextId;
-        });
-        console.log("Assigned new user ID:", newId);
-
-        // 2. Create the Firebase Auth user
-        const userCredential = await createUserWithEmailAndPassword(auth, email, password);
-        const user = userCredential.user;
-
-        // 3. Set displayName
-        await updateProfile(user, { displayName: username });
-
-        // 4. Create profile with integer ID
-        await setDoc(doc(db, "profiles", newId.toString()), {
-          uid: user.uid,
-          username: username,
-          displayName: username,
-          email: email,
-          createdAt: new Date().toISOString(),
-          avatarUrl: "/users/default/pfp.jpg",
-          bio: "",
-          accentColor: "#0099ff",
-          background: { type: "color", value: "#0d001f" },
-          sections: [],
-          posts: []
-        });
-        console.log("Profile created for ID:", newId);
-
-        rememberLocalSession(newId, user, username);
-        showMessage(`Account created! Your ID: ${newId} · Welcome, ${username}!`, "#a6e3a1");
-
-        if (confirm("Enable SMS 2FA now?")) {
-          const phone = prompt("Enter phone number (e.g. +12025550123)");
-          if (phone) await enrollMFA(phone);
+        if (handleRaw && !(await cloud.isHandleAvailable(handle))) {
+          showMessage("@" + handle + " is taken. Pick another handle.", "#ff5555");
+          return;
         }
-
-        setTimeout(() => window.location.href = '/index.html', 1800);
+        await applyPersistence();
+        cloud.setPendingSignup({ username, handle });
+        const cred = await createUserWithEmailAndPassword(auth, email, password);
+        updateProfile(cred.user, { displayName: username }).catch(() => {});
+        try { await sendEmailVerification(cred.user); } catch (_) {}
+        await finishSignIn(cred.user, { username, handle });
       } catch (err) {
+        cloud.setPendingSignup(null);
         console.error("Signup error:", err);
-        let msg = "Error creating account";
-        if (err.code === 'auth/email-already-in-use') msg = "Email already in use";
-        if (err.code === 'auth/invalid-email') msg = "Invalid email";
-        if (err.code === 'auth/weak-password') msg = "Password too weak";
-        if (err.code === 'permission-denied') msg = "Permission denied - check Firestore rules";
-        showMessage(msg + " (see console for details)", "#ff5555");
+        showMessage(friendlyAuthError(err, "Could not create your account. Please try again."), "#ff5555");
+      } finally {
+        setBusy(false);
       }
     }
 
-    async function ensureProfileExists() {
-      const user = auth.currentUser;
-      if (!user) return;
-
-      try {
-        const q = query(collection(db, "profiles"), where("uid", "==", user.uid));
-        const snap = await getDocs(q);
-
-        if (snap.empty) {
-          console.log("No profile found - creating one now");
-          const counterRef = doc(db, "counters", "users");
-          const newId = await runTransaction(db, async (transaction) => {
-            const counterDoc = await transaction.get(counterRef);
-            let currentNextId = counterDoc.exists() ? counterDoc.data().nextId : 0;
-            transaction.set(counterRef, { nextId: currentNextId + 1 }, { merge: true });
-            return currentNextId;
-          });
-
-          await setDoc(doc(db, "profiles", newId.toString()), {
-            uid: user.uid,
-            username: user.displayName || user.email.split('@')[0],
-            displayName: user.displayName || user.email.split('@')[0],
-            email: user.email,
-            createdAt: new Date().toISOString(),
-            avatarUrl: user.photoURL || "/users/default/pfp.jpg",
-            bio: "",
-            accentColor: "#0099ff",
-            background: { type: "color", value: "#0d001f" },
-            sections: [],
-            posts: []
-          });
-          console.log("Created profile with ID:", newId);
-          return newId.toString();
-        } else {
-          const profileId = snap.docs[0].id;
-          console.log("Profile already exists with ID:", profileId);
-          return profileId;
-        }
-      } catch (err) {
-        console.error("Profile ensure failed:", err);
-        return null;
-      }
-    }
-
-    // --- ENROLL MFA -----------------------------------
-    async function enrollMFA(phoneNumber) {
-      try {
-        const user = auth.currentUser;
-        if (!user) throw new Error("Not signed in");
-
-        const session = await multiFactor(user).getSession();
-        const phoneOpts = { phoneNumber, session };
-        const verificationId = await PhoneAuthProvider.verifyPhoneNumber(phoneOpts, recaptchaVerifier);
-
-        const code = prompt("Enter the 6-digit code sent to your phone:");
-        if (!code) throw new Error("No code entered");
-
-        const cred = PhoneAuthProvider.credential(verificationId, code.trim());
-        const assertion = PhoneMultiFactorGenerator.assertion(cred);
-        await multiFactor(user).enroll(assertion, "My Phone");
-
-        showMessage("2FA enabled!", "#a6e3a1");
-      } catch (err) {
-        showMessage("2FA setup failed", "#ff5555");
-        console.error(err);
-      }
-    }
-
-    // --- LOGIN (username or email) --------------------
+    // --- LOGIN ---
     async function login() {
-      let input    = document.getElementById('loginUsername').value.trim();
-      const password = document.getElementById('loginPassword').value;
+      if (busy) return;
+      const email = document.getElementById("loginUsername").value.trim();
+      const password = document.getElementById("loginPassword").value;
+      if (!email || !password) return showMessage("Enter your email and password.", "#ff5555");
 
-      if (!input || !password) return showMessage("Enter email + password", "#ff5555");
-
-      let emailToUse = input;
-      if (!input.includes('@')) {
-        try {
-          const usernameDoc = await getDoc(doc(db, "usernames", input.toLowerCase()));
-          if (!usernameDoc.exists()) return showMessage("Username not found", "#ff5555");
-          emailToUse = usernameDoc.data().email;
-        } catch (err) {
-          console.error("Username lookup failed", err);
-          return showMessage("Error checking username", "#ff5555");
-        }
-      }
-
+      setBusy(true);
+      showMessage("Logging in...");
       try {
-        const userCredential = await signInWithEmailAndPassword(auth, emailToUse, password);
-        const user = userCredential.user;
-
-        showMessage(`Welcome back, ${user.displayName || user.email}!`, "#a6e3a1");
-
-        const profileId = await ensureProfileExists();
-        rememberLocalSession(profileId, user, user.displayName || (user.email && user.email.split("@")[0]));
-
-        setTimeout(() => window.location.href = '/index.html', 1200);
+        await applyPersistence();
+        const cred = await signInWithEmailAndPassword(auth, email, password);
+        await finishSignIn(cred.user);
       } catch (err) {
-        if (err.code === 'auth/multi-factor-auth-required') {
-          const resolver = getMultiFactorResolver(auth, err);
-          const hint = resolver.hints[0];
-          const phoneOpts = { multiFactorHint: hint, session: resolver.session };
-          const verificationId = await PhoneAuthProvider.verifyPhoneNumber(phoneOpts, recaptchaVerifier);
-
-          const code = prompt("Enter 6-digit code:");
-          if (!code) return showMessage("Code required", "#ff5555");
-
-          const cred = PhoneAuthProvider.credential(verificationId, code.trim());
-          const assertion = PhoneMultiFactorGenerator.assertion(cred);
-          await resolver.resolveSignIn(assertion);
-
-          console.log("[MFA] Completed - user object:", auth.currentUser);
-          showMessage("Logged in with 2FA!", "#a6e3a1");
-          const profileId = await ensureProfileExists();
-          const u = auth.currentUser;
-          rememberLocalSession(profileId, u, u && (u.displayName || (u.email && u.email.split("@")[0])));
-
-          setTimeout(() => window.location.href = '/index.html', 1200);
+        if (err && err.code === "auth/multi-factor-auth-required") {
+          await resolveMfa(err);
         } else {
-          let msg = "Could not sign in. Check your email and password.";
-          if (err.code === 'auth/invalid-email') msg = "That email address looks invalid.";
-          else if (err.code === 'auth/user-not-found') msg = "No account found for that email.";
-          else if (err.code === 'auth/wrong-password') msg = "Wrong password.";
-          else if (err.code === 'auth/invalid-credential' || err.code === 'auth/invalid-login-credentials') {
-            msg = "Wrong email or password.";
-          } else if (err.code === 'auth/too-many-requests') {
-            msg = "Too many attempts. Try again in a bit.";
-          } else if (err.code === 'auth/user-disabled') {
-            msg = "This account is disabled.";
-          }
-          showMessage(msg, "#ff5555");
+          console.error("Login error:", err);
+          showMessage(friendlyAuthError(err, "Could not sign in. Check your email and password."), "#ff5555");
         }
+      } finally {
+        setBusy(false);
       }
     }
 
-    // --- TOGGLE FORMS ---------------------------------
+    // --- SMS second factor for accounts that enrolled it ---
+    async function resolveMfa(err) {
+      try {
+        if (!recaptchaVerifier) {
+          recaptchaVerifier = new RecaptchaVerifier(auth, "recaptcha-container", { size: "invisible" });
+          await recaptchaVerifier.render();
+        }
+        const resolver = getMultiFactorResolver(auth, err);
+        const hint = resolver.hints[0];
+        const verificationId = await new PhoneAuthProvider(auth).verifyPhoneNumber(
+          { multiFactorHint: hint, session: resolver.session }, recaptchaVerifier);
+        const code = prompt("Enter the 6-digit code sent to " + (hint.phoneNumber || "your phone") + ":");
+        if (!code) throw new Error("No code entered");
+        const cred = PhoneAuthProvider.credential(verificationId, code.trim());
+        const result = await resolver.resolveSignIn(PhoneMultiFactorGenerator.assertion(cred));
+        await finishSignIn(result.user);
+      } catch (mfaErr) {
+        console.error("MFA error:", mfaErr);
+        showMessage("Two-factor sign-in failed. Try again.", "#ff5555");
+      }
+    }
+
+    async function forgotPassword() {
+      const email = document.getElementById("loginUsername").value.trim()
+        || (prompt("Enter the email for your account:") || "").trim();
+      if (!email) return;
+      try {
+        await sendPasswordResetEmail(auth, email);
+        showMessage("If that email has an account, a reset link is on its way.", "#a6e3a1");
+      } catch (err) {
+        showMessage(friendlyAuthError(err, "Could not send a reset email."), "#ff5555");
+      }
+    }
+
     function toggleForms() {
       isLogin = !isLogin;
-      document.getElementById('loginForm').classList.toggle('active');
-      document.getElementById('signupForm').classList.toggle('active');
-      document.getElementById('toggleText').textContent =
+      document.getElementById("loginForm").classList.toggle("active");
+      document.getElementById("signupForm").classList.toggle("active");
+      document.getElementById("toggleText").textContent =
         isLogin ? "Don't have an account? Sign up" : "Already have an account? Log in";
+      showMessage("");
     }
 
-    // --- INIT -----------------------------------------
-    window.addEventListener('load', async () => {
-      await initRecaptcha();
-      console.log("DOM fully loaded - attaching listeners now");
-
-      const toggleEl   = document.getElementById('toggleText');
-      const loginBtn   = document.getElementById('loginButton');
-      const signupBtn  = document.getElementById('signupButton');
-      const forgotSpan = document.querySelector('.extra span');
-
-      if (toggleEl)   toggleEl.addEventListener('click', toggleForms);
-      if (loginBtn)   loginBtn.addEventListener('click', login);
-      if (signupBtn)  signupBtn.addEventListener('click', signup);
-      if (forgotSpan) {
-        forgotSpan.addEventListener('click', () => {
-          alert("Forgot password coming soon!");
-        });
-      }
+    document.getElementById("toggleText").addEventListener("click", toggleForms);
+    document.getElementById("loginButton").addEventListener("click", login);
+    document.getElementById("signupButton").addEventListener("click", signup);
+    document.getElementById("forgotPassword").addEventListener("click", forgotPassword);
+    if (new URLSearchParams(location.search).get("mode") === "signup") toggleForms();
+    document.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") isLogin ? login() : signup();
     });
 
-    // Enter key support
-    document.addEventListener('keypress', e => {
-      if (e.key === 'Enter') isLogin ? login() : signup();
+    // Already signed in? Go straight back.
+    cloud.ready.then(() => {
+      if (auth.currentUser && cloud.currentProfile()) window.location.replace(nextUrl());
     });
   </script>
 </body>
