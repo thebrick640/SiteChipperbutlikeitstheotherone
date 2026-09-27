@@ -6,10 +6,30 @@
       "**/.*",
       "**/node_modules/**",
       "**/*.py",
+      "**/*.md",
+      "**/*.bak",
+      "**/*.bak_*",
       "**/_patch*",
       "**/_probe*",
       "**/_fix*",
-      "**/_verify*"
+      "**/_verify*",
+      "_batch4/**",
+      "_extract/**",
+      "data/_backup_pre_autopublish/**",
+      "functions/**",
+      "tools/**",
+      "tests/**",
+      "package.json",
+      "package-lock.json",
+      "mise.toml",
+      "serve.json",
+      "vercel.json",
+      "_redirects",
+      "database.rules.json",
+      "firestore.rules",
+      "firestore.indexes.json",
+      "storage.rules",
+      "test.html"
     ],
     "headers": [
       {
@@ -179,5 +199,26 @@
   },
   "firestore": {
     "rules": "firestore.rules"
+  },
+  "storage": {
+    "rules": "storage.rules"
+  },
+  "emulators": {
+    "singleProjectMode": true,
+    "auth": {
+      "host": "127.0.0.1",
+      "port": 9099
+    },
+    "firestore": {
+      "host": "127.0.0.1",
+      "port": 8080
+    },
+    "storage": {
+      "host": "127.0.0.1",
+      "port": 9199
+    },
+    "ui": {
+      "enabled": false
+    }
   }
 }

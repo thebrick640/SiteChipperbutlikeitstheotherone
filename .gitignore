@@ -1,0 +1,26 @@
+# Dependencies
+node_modules/
+
+# Firebase local state
+.firebase/
+.emulator-data/
+firebase-debug*.log
+firestore-debug.log
+ui-debug.log
+database-debug.log
+pubsub-debug.log
+
+# Editor/agent backups and scratch output
+*.bak
+*.bak_*
+__pycache__/
+*.pyc
+
+# Hoplite workspace runtime (settings.json stays tracked)
+.hoplite/*
+!.hoplite/settings.json
+.context/
+
+# OS
+.DS_Store
+Thumbs.db

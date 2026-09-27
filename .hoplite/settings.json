@@ -1,0 +1,9 @@
+{
+  "scripts": {
+    "setup": "npm ci --no-audit --no-fund && npx firebase setup:emulators:firestore && npx firebase setup:emulators:storage",
+    "run": "npm run dev"
+  },
+  "ports": {
+    "preview": 8000
+  }
+}
