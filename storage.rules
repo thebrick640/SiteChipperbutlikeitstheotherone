@@ -1,7 +1,18 @@
 rules_version = '2';
-// Locked down until media uploads move to Cloud Storage.
+// User uploads live under media/<uid>/. Public read, owner write, typed and sized.
 service firebase.storage {
   match /b/{bucket}/o {
+    match /media/{userId}/{fileName} {
+      allow read: if true;
+      allow create: if request.auth != null
+        && request.auth.uid == userId
+        && fileName.matches('^[A-Za-z0-9._-]{1,120}$')
+        && !request.resource.contentType.matches('image/svg.*')
+        && ((request.resource.contentType.matches('image/.*') && request.resource.size < 10 * 1024 * 1024)
+          || (request.resource.contentType.matches('(video|audio)/.*') && request.resource.size < 50 * 1024 * 1024));
+      allow delete: if request.auth != null && request.auth.uid == userId;
+      allow update: if false;
+    }
     match /{allPaths=**} {
       allow read, write: if false;
     }

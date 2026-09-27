@@ -1,10 +1,400 @@
 rules_version = '2';
+
+// Coolbrador data model. Every write is validated here because the site has no
+// server: clients write directly, so these rules are the only authority.
 service cloud.firestore {
   match /databases/{database}/documents {
+
+    // ---------- helpers ----------
+    function signedIn() { return request.auth != null; }
+    function uid() { return request.auth.uid; }
+    function path(p) { return /databases/$(database)/documents/$(p); }
+    function userPath(u) { return /databases/$(database)/documents/users/$(u); }
+    function me() { return get(userPath(uid())).data; }
+    function hasProfile() { return signedIn() && exists(userPath(uid())); }
+    function myPublicId() { return me().publicId; }
+    function adminsDoc() { return /databases/$(database)/documents/config/admins; }
+    function isAdmin() {
+      return signedIn() && exists(adminsDoc()) && uid() in get(adminsDoc()).data.uids;
+    }
+    function isMod() { return isAdmin() || (hasProfile() && me().get('role', 'user') in ['mod', 'admin']); }
+    // Signed in, has a profile, and not banned: required for anything user-generated.
+    function active() { return hasProfile() && me().get('banned', false) != true; }
+    function incoming() { return request.resource.data; }
+    function existing() { return resource.data; }
+    function changedKeys() { return incoming().diff(existing()).affectedKeys(); }
+    function onlyChanged(keys) { return changedKeys().hasOnly(keys); }
+    function isStr(v, min, max) { return v is string && v.size() >= min && v.size() <= max; }
+    // http(s) or site-relative only: blocks javascript: and data: URLs (stored XSS).
+    function isUrl(v) { return v is string && v.size() <= 2048 && v.matches('^(https?://|/)[^\\s"<>]*$'); }
+    function isUrlOrEmpty(v) { return v == '' || isUrl(v); }
+    function nowish(v) { return v == request.time; }
+
+    // ---------- identity ----------
+    // Public numeric ids (for /users/<id> URLs) come from a shared counter.
+    // Ids below 100 are reserved for Coolbrador's mascot/character profiles.
+    function pubIdPath(id) { return /databases/$(database)/documents/publicIds/$(id); }
+    function handlePath(h) { return /databases/$(database)/documents/handles/$(h); }
+    function counterPath() { return /databases/$(database)/documents/counters/users; }
+
+    match /counters/users {
+      allow read: if signedIn();
+      allow create: if signedIn()
+        && incoming().keys().hasOnly(['nextId'])
+        && incoming().nextId == 101
+        && getAfter(pubIdPath('100')).data.uid == uid();
+      allow update: if signedIn()
+        && incoming().keys().hasOnly(['nextId'])
+        && ((existing().nextId >= 100 && incoming().nextId == existing().nextId + 1)
+          || (existing().nextId < 100 && incoming().nextId == 101))
+        && getAfter(pubIdPath(string(incoming().nextId - 1))).data.uid == uid();
+    }
+
+    match /publicIds/{id} {
+      allow read: if true;
+      allow create: if signedIn()
+        && id.matches('^[1-9][0-9]{2,11}$')
+        && incoming().keys().hasOnly(['uid', 'createdAt'])
+        && incoming().uid == uid()
+        && nowish(incoming().createdAt)
+        && getAfter(counterPath()).data.nextId == int(id) + 1
+        && !exists(userPath(uid()))
+        && getAfter(userPath(uid())).data.publicId == id;
+      allow update, delete: if false;
+    }
+
+    match /handles/{handle} {
+      allow read: if true;
+      allow create: if signedIn()
+        && handle.matches('^[a-z0-9_]{3,24}$')
+        && incoming().keys().hasOnly(['uid', 'createdAt'])
+        && incoming().uid == uid()
+        && nowish(incoming().createdAt)
+        && getAfter(userPath(uid())).data.handle == handle;
+      // Released only as part of switching to a different handle.
+      allow delete: if signedIn()
+        && existing().uid == uid()
+        && getAfter(userPath(uid())).data.handle != handle;
+      allow update: if false;
+    }
+
+    function validProfileFields(d) {
+      return isStr(d.username, 1, 40)
+        && isUrlOrEmpty(d.get('avatar', ''))
+        && isUrlOrEmpty(d.get('banner', ''))
+        && isUrlOrEmpty(d.get('aboutImage', ''))
+        && isStr(d.get('bio', ''), 0, 280)
+        && isStr(d.get('about', ''), 0, 1200)
+        && d.get('socials', []) is list && d.get('socials', []).size() <= 16
+        && d.get('sections', []) is list && d.get('sections', []).size() <= 20
+        && d.get('layoutPreset', 'profile') in ['profile', 'card', 'links']
+        && (d.get('accentColor', '') == '' || d.get('accentColor', '').matches('^#[0-9a-fA-F]{6}$'))
+        && isStr(d.get('status', ''), 0, 80);
+    }
+
+    function ownerEditableKeys() {
+      return ['username', 'avatar', 'banner', 'aboutImage', 'bio', 'about', 'socials',
+              'sections', 'layoutPreset', 'accentColor', 'status', 'handle', 'updatedAt'];
+    }
+
+    match /users/{userId} {
+      allow read: if true;
+
+      allow create: if signedIn() && userId == uid()
+        && incoming().keys().hasOnly(ownerEditableKeys().concat(['publicId', 'createdAt', 'role', 'banned']))
+        && incoming().keys().hasAll(['publicId', 'handle', 'username', 'createdAt'])
+        && incoming().publicId is string
+        && getAfter(pubIdPath(incoming().publicId)).data.uid == uid()
+        && incoming().handle is string
+        && getAfter(handlePath(incoming().handle)).data.uid == uid()
+        && nowish(incoming().createdAt)
+        && incoming().get('role', 'user') == 'user'
+        && incoming().get('banned', false) == false
+        && validProfileFields(incoming());
+
+      allow update: if (signedIn() && userId == uid()
+          && onlyChanged(ownerEditableKeys())
+          && validProfileFields(incoming())
+          && (!('handle' in changedKeys())
+            || (getAfter(handlePath(incoming().handle)).data.uid == uid()
+              && !existsAfter(handlePath(existing().handle)))))
+        || (isAdmin() && onlyChanged(['role', 'banned', 'updatedAt'])
+          && incoming().get('role', 'user') in ['user', 'mod', 'admin'])
+        || (isMod() && existing().get('role', 'user') == 'user' && onlyChanged(['banned', 'updatedAt']));
+
+      allow delete: if false;
+
+      // Owner-only settings (blocks, preferences). Rules can still exists() these.
+      match /private/{doc} {
+        allow read, write: if signedIn() && userId == uid();
+      }
+      match /blocked/{otherUid} {
+        allow read, write: if signedIn() && userId == uid();
+      }
+
+      match /notifications/{nid} {
+        allow read: if signedIn() && userId == uid();
+        allow create: if active()
+          && userId != uid()
+          && exists(userPath(userId))
+          && !exists(/databases/$(database)/documents/users/$(userId)/blocked/$(uid()))
+          && incoming().keys().hasOnly(['type', 'fromUid', 'fromUserId', 'fromName', 'fromAvatar',
+                                         'text', 'href', 'board', 'postId', 'replyId', 'snippet',
+                                         'read', 'createdAt'])
+          && incoming().type in ['yeah', 'reply', 'mention', 'follow', 'repost', 'message', 'poll', 'system']
+          && incoming().fromUid == uid()
+          && incoming().fromUserId == myPublicId()
+          && incoming().read == false
+          && nowish(incoming().createdAt)
+          && isStr(incoming().get('text', ''), 0, 300)
+          && isStr(incoming().get('snippet', ''), 0, 200)
+          && isUrlOrEmpty(incoming().get('href', ''));
+        allow update: if signedIn() && userId == uid() && onlyChanged(['read']);
+        allow delete: if signedIn() && userId == uid();
+      }
+    }
+
+    // ---------- posts ----------
+    function validMedia(m) {
+      return m == null || (m is map
+        && m.keys().hasOnly(['type', 'url', 'path', 'contentWarnings', 'name', 'w', 'h'])
+        && m.type in ['image', 'video', 'audio']
+        && isUrl(m.url)
+        && m.get('contentWarnings', []) is list && m.get('contentWarnings', []).size() <= 8);
+    }
+
+    // Yeah toggles add or remove exactly the caller's own public id.
+    function yeahToggleValid() {
+      let before = existing().get('yeahs', []).toSet();
+      let after = incoming().yeahs.toSet();
+      let mine = [myPublicId()].toSet();
+      return incoming().yeahs.size() == after.size()
+        && ((after.difference(before) == mine && before.difference(after).size() == 0)
+          || (before.difference(after) == mine && after.difference(before).size() == 0));
+    }
+
+    function postFields() {
+      return ['uid', 'userId', 'username', 'avatar', 'board', 'boardKey', 'text', 'media',
+              'contentWarnings', 'sensitive', 'nsfw', 'createdAt', 'yeahs', 'replyCount',
+              'repostOf', 'inGame', 'feeling'];
+    }
+
+    match /posts/{postId} {
+      allow read: if true;
+
+      allow create: if active()
+        && incoming().keys().hasOnly(postFields())
+        && incoming().uid == uid()
+        && incoming().userId == myPublicId()
+        && incoming().username == me().username
+        && isUrlOrEmpty(incoming().get('avatar', ''))
+        && incoming().board is string && incoming().board.matches('^[A-Za-z0-9_]{1,32}$')
+        && incoming().boardKey == incoming().board.lower()
+        && isStr(incoming().text, 0, 3000)
+        && validMedia(incoming().get('media', null))
+        && incoming().get('contentWarnings', []) is list
+        && nowish(incoming().createdAt)
+        && incoming().yeahs == []
+        && incoming().replyCount == 0
+        && (incoming().text.size() > 0 || incoming().get('media', null) != null
+          || incoming().get('repostOf', null) != null)
+        && (incoming().get('repostOf', null) == null
+          || (incoming().repostOf is map && incoming().repostOf.postId is string))
+        && incoming().get('inGame', false) == false;
+
+      // Admins import canonical Chipper in-game posts (mascot authors, ids < 100)
+      // so everyone can yeah and reply to them.
+      allow create: if isAdmin()
+        && incoming().keys().hasOnly(postFields().concat(['sourceId']))
+        && incoming().uid == uid()
+        && incoming().inGame == true
+        && incoming().userId is string && incoming().userId.matches('^[0-9]{1,2}$')
+        && isStr(incoming().username, 1, 40)
+        && incoming().board is string && incoming().boardKey == incoming().board.lower()
+        && isStr(incoming().text, 0, 3000)
+        && validMedia(incoming().get('media', null))
+        && incoming().yeahs == []
+        && incoming().replyCount == 0;
+
+      allow update: if active() && (
+          (existing().uid == uid()
+            && onlyChanged(['text', 'editedAt', 'contentWarnings', 'sensitive', 'nsfw'])
+            && isStr(incoming().text, 0, 3000)
+            && nowish(incoming().editedAt))
+          || (onlyChanged(['yeahs']) && yeahToggleValid())
+          || (onlyChanged(['replyCount', 'lastReplyId', 'lastReplyAt']) && replyCountValid(postId)));
+
+      allow delete: if signedIn() && (existing().uid == uid() || isMod());
+
+      // Every replyCount change must reference a reply created or deleted in the same batch.
+      function replyCountValid(pid) {
+        let rid = incoming().lastReplyId;
+        let rpath = /databases/$(database)/documents/posts/$(pid)/replies/$(rid);
+        let before = existing().get('replyCount', 0);
+        return rid is string
+          && ((incoming().replyCount == before + 1 && !exists(rpath) && existsAfter(rpath)
+                && getAfter(rpath).data.uid == uid())
+            || (incoming().replyCount == before - 1 && exists(rpath) && !existsAfter(rpath)));
+      }
+
+      match /replies/{replyId} {
+        allow read: if true;
+        allow create: if active()
+          && exists(/databases/$(database)/documents/posts/$(postId))
+          && incoming().keys().hasOnly(['uid', 'userId', 'username', 'avatar', 'parentId', 'text',
+                                         'media', 'createdAt', 'yeahs'])
+          && incoming().uid == uid()
+          && incoming().userId == myPublicId()
+          && incoming().username == me().username
+          && isUrlOrEmpty(incoming().get('avatar', ''))
+          && (incoming().get('parentId', null) == null || incoming().parentId is string)
+          && isStr(incoming().text, 0, 3000)
+          && validMedia(incoming().get('media', null))
+          && (incoming().text.size() > 0 || incoming().get('media', null) != null)
+          && nowish(incoming().createdAt)
+          && incoming().yeahs == [];
+        allow update: if active() && (
+            (existing().uid == uid() && onlyChanged(['text', 'editedAt'])
+              && isStr(incoming().text, 1, 3000) && nowish(incoming().editedAt))
+            || (onlyChanged(['yeahs']) && yeahToggleValid()));
+        allow delete: if signedIn() && (existing().uid == uid() || isMod()
+          || get(/databases/$(database)/documents/posts/$(postId)).data.uid == uid());
+      }
+    }
+
+    // ---------- boards (communities) ----------
+    match /boards/{boardKey} {
+      allow read: if true;
+      allow create: if active()
+        && incoming().keys().hasOnly(['name', 'desc', 'icon', 'createdBy', 'createdAt'])
+        && incoming().name is string && incoming().name.matches('^[A-Za-z0-9_]{2,32}$')
+        && boardKey == incoming().name.lower()
+        && isStr(incoming().get('desc', ''), 0, 280)
+        && isUrlOrEmpty(incoming().get('icon', ''))
+        && incoming().createdBy == uid()
+        && nowish(incoming().createdAt);
+      allow update: if (isMod() || (active() && existing().createdBy == uid()))
+        && onlyChanged(['desc', 'icon', 'updatedAt'])
+        && isStr(incoming().get('desc', ''), 0, 280)
+        && isUrlOrEmpty(incoming().get('icon', ''));
+      allow delete: if isAdmin();
+    }
+
+    // ---------- follows ----------
+    match /follows/{followId} {
+      allow read: if true;
+      allow create: if active()
+        && incoming().keys().hasOnly(['follower', 'followee', 'followerId', 'followeeId', 'createdAt'])
+        && incoming().follower == uid()
+        && incoming().followee != uid()
+        && followId == uid() + '_' + incoming().followee
+        && exists(userPath(incoming().followee))
+        && incoming().followerId == myPublicId()
+        && incoming().followeeId == get(userPath(incoming().followee)).data.publicId
+        && nowish(incoming().createdAt);
+      allow update: if false;
+      allow delete: if signedIn() && existing().follower == uid();
+    }
+
+    // ---------- direct messages ----------
+    function convPath(cid) { return /databases/$(database)/documents/conversations/$(cid); }
+
+    match /conversations/{cid} {
+      // get on a missing doc is allowed so clients can check for an existing DM.
+      allow get: if signedIn() && (resource == null || uid() in existing().members);
+      allow list: if signedIn() && uid() in existing().members;
+      allow create: if active()
+        && incoming().keys().hasOnly(['members', 'memberIds', 'group', 'title', 'image', 'createdBy',
+                                       'createdAt', 'updatedAt', 'lastMessage', 'lastRead'])
+        && incoming().members is list
+        && uid() in incoming().members
+        && incoming().members.size() >= 2 && incoming().members.size() <= 32
+        && incoming().members.toSet().size() == incoming().members.size()
+        && incoming().createdBy == uid()
+        && nowish(incoming().createdAt)
+        && isStr(incoming().get('title', ''), 0, 60)
+        && isUrlOrEmpty(incoming().get('image', ''))
+        && ((incoming().group == true && cid.matches('^g_[A-Za-z0-9_-]{6,64}$'))
+          || (incoming().group == false
+            && incoming().members.size() == 2
+            && incoming().members[0] < incoming().members[1]
+            && cid == 'dm_' + incoming().members[0] + '_' + incoming().members[1]
+            && exists(userPath(incoming().members[0]))
+            && exists(userPath(incoming().members[1]))));
+      allow update: if signedIn() && uid() in existing().members && (
+          (onlyChanged(['lastMessage', 'updatedAt']) && incoming().lastMessage.from == uid())
+          || (onlyChanged(['lastRead'])
+            && incoming().lastRead.diff(existing().get('lastRead', {})).affectedKeys().hasOnly([uid()]))
+          || (existing().group == true
+            && onlyChanged(['title', 'image', 'members', 'memberIds', 'updatedAt'])
+            && isStr(incoming().get('title', ''), 0, 60)
+            && isUrlOrEmpty(incoming().get('image', ''))
+            && incoming().members.size() <= 32
+            && (existing().members.toSet().difference(incoming().members.toSet()).hasOnly([uid()])
+              || existing().createdBy == uid())));
+      allow delete: if false;
+
+      match /messages/{mid} {
+        function conv() { return get(convPath(cid)).data; }
+        function notBlockedByPeer() {
+          return conv().group == true
+            || (conv().members[0] == uid()
+              && !exists(/databases/$(database)/documents/users/$(conv().members[1])/blocked/$(uid())))
+            || (conv().members[1] == uid()
+              && !exists(/databases/$(database)/documents/users/$(conv().members[0])/blocked/$(uid())));
+        }
+        allow read: if signedIn() && uid() in conv().members;
+        allow create: if active()
+          && uid() in conv().members
+          && notBlockedByPeer()
+          && incoming().keys().hasOnly(['from', 'fromId', 'text', 'media', 'createdAt'])
+          && incoming().from == uid()
+          && incoming().fromId == myPublicId()
+          && isStr(incoming().text, 0, 4000)
+          && validMedia(incoming().get('media', null))
+          && (incoming().text.size() > 0 || incoming().get('media', null) != null)
+          && nowish(incoming().createdAt);
+        allow update: if false;
+        allow delete: if signedIn() && existing().from == uid();
+      }
+    }
+
+    // ---------- reports & moderation ----------
+    match /reports/{rid} {
+      allow create: if active()
+        && incoming().keys().hasOnly(['reporter', 'reporterId', 'targetType', 'targetId', 'targetPath',
+                                       'targetUid', 'reason', 'text', 'snapshot', 'createdAt', 'status'])
+        && incoming().reporter == uid()
+        && incoming().reporterId == myPublicId()
+        && incoming().targetType in ['post', 'reply', 'user', 'message', 'poll', 'board']
+        && incoming().reason in ['spam', 'harassment', 'hate', 'sexual', 'violence', 'self-harm',
+                                  'misinformation', 'impersonation', 'other']
+        && isStr(incoming().get('text', ''), 0, 1000)
+        && incoming().status == 'open'
+        && nowish(incoming().createdAt);
+      allow read, update: if isMod();
+      allow delete: if isAdmin();
+    }
+
+    match /modlog/{entry} {
+      allow read: if isMod();
+      allow create: if isMod() && incoming().by == uid() && nowish(incoming().createdAt);
+      allow update, delete: if false;
+    }
+
+    // ---------- Chipper game feed (published by moderators, read by anyone) ----------
     match /chipper/{doc} {
       allow read: if true;
-      allow write: if true;
+      allow write: if isMod();
     }
+
+    // Site config (admin allowlist etc.) is edited from the Firebase console only.
+    match /config/{doc} {
+      allow read: if true;
+      allow write: if false;
+    }
+
+    // Everything else, including legacy profiles/{id} docs that contain emails.
     match /{document=**} {
       allow read, write: if false;
     }
