@@ -1,4 +1,4 @@
-import { auth, state, ensureProfile, saveProfile, watchAuth } from './social-api.js';
+import { auth, state, restoreSession, saveProfile } from './social-api.js';
 import { createUserWithEmailAndPassword, signInWithEmailAndPassword, sendPasswordResetEmail,
   updateProfile, getMultiFactorResolver, RecaptchaVerifier, PhoneAuthProvider, PhoneMultiFactorGenerator
 } from 'https://www.gstatic.com/firebasejs/10.14.1/firebase-auth.js';
@@ -15,8 +15,13 @@ const messages = {
   'auth/wrong-password': 'The email or password is incorrect.',
   'auth/user-not-found': 'The email or password is incorrect.',
   'auth/too-many-requests': 'Too many attempts. Please try again later.',
+  'auth/invalid-verification-code': 'That verification code is incorrect. Please sign in again to retry.',
+  'auth/code-expired': 'That verification code has expired. Please sign in again for a new code.',
+  'auth/operation-not-allowed': 'Email sign-in is currently unavailable. Please contact support.',
+  'auth/invalid-api-key': 'Sign-in is temporarily unavailable. Please contact support.',
   'auth/network-request-failed': 'Unable to connect. Check your connection and try again.'
 };
+const profileFailureMessage = 'You are signed in, but your profile could not load. Try signing in again to retry, or explore the community below.';
 function report(message) { status.textContent = message; }
 function setBusy(value) {
   busy = value;
@@ -38,16 +43,7 @@ document.querySelector('#authToggle').onclick = () => {
   (signup ? form.elements.displayName : form.elements.email).focus();
 };
 async function finish(user, name) {
-  await ensureProfile(user, name);
-  if (!state.profile || state.user?.uid !== user.uid) await new Promise((resolve, reject) => {
-    const timer = setTimeout(() => { stop(); reject(new Error('Your account is created. Please sign in again to finish setting up your profile.')); }, 15000);
-    const stop = watchAuth(s => {
-      if (s.user?.uid === user.uid && (s.profile || s.error)) {
-        clearTimeout(timer); queueMicrotask(() => stop());
-        if (s.error) reject(s.error); else resolve();
-      }
-    });
-  });
+  await restoreSession(user);
   if (name) await saveProfile({ displayName: name, bio: state.profile.bio || '' });
   const next = new URLSearchParams(location.search).get('next');
   let target=new URL('/',location.origin);
@@ -58,6 +54,7 @@ form.onsubmit = async event => {
   event.preventDefault(); if (busy) return;
   const email = form.elements.email.value.trim(), password = form.elements.password.value;
   const name = form.elements.displayName.value.trim();
+  if (signup && !name) { report('Enter a display name.'); form.elements.displayName.focus(); return; }
   setBusy(true); report(signup ? 'Creating your account…' : 'Signing in…');
   try {
     const result = signup ? await createUserWithEmailAndPassword(auth, email, password) : await signInWithEmailAndPassword(auth, email, password);
@@ -76,8 +73,8 @@ form.onsubmit = async event => {
           const result = await resolver.resolveSignIn(PhoneMultiFactorGenerator.assertion(PhoneAuthProvider.credential(verificationId, code.trim())));
           await finish(result.user);
         } finally { verifier.clear(); }
-      } catch (mfaError) { report(messages[mfaError.code] || mfaError.message); }
-    } else report(messages[error.code] || 'Could not finish signing in. Please try again.');
+      } catch (mfaError) { report(messages[mfaError.code] || (mfaError.message.startsWith('Verification cancelled.') ? mfaError.message : auth.currentUser ? profileFailureMessage : 'Two-factor verification could not finish. Please try again.')); }
+    } else report(messages[error.code] || (auth.currentUser ? profileFailureMessage : 'Could not finish signing in. Please try again.'));
     setBusy(false);
   }
 };
@@ -89,3 +86,8 @@ document.querySelector('#passwordReset').onclick = async () => {
   catch (error) { report(messages[error.code] || 'Could not send a reset link. Please try again.'); }
   finally { setBusy(false); }
 };
+
+// Enabled only after all handlers and imports are ready.
+document.querySelector('#authFields').disabled = false;
+setBusy(false);
+report('');

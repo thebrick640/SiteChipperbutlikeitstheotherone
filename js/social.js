@@ -23,7 +23,8 @@ const empty = (title, description = '', action = '') => `<div class="social-empt
 const options = value => api.BOARDS.map(b => `<option${b === value ? ' selected' : ''}>${b}</option>`).join('');
 let friends = [], blocks = [], people = [], feedRender = () => {}, disposers = [], cardDisposers = [];
 const posts = new Map();
-let booted = false, anchorReached=false;
+const publicPages = new Set(['home', 'community', 'board', 'post', 'search', 'gift', 'profile', 'polls', 'archive']);
+let bootRevision = 0, anchorReached=false;
 function revealAnchor(){if(anchorReached||!location.hash)return;let target;try{target=document.getElementById(decodeURIComponent(location.hash.slice(1)));}catch(_){}if(target){anchorReached=true;target.scrollIntoView({block:'center'});target.setAttribute('tabindex','-1');target.focus({preventScroll:true});}}
 const notice = document.createElement('div');
 notice.className = 'social-toast'; notice.setAttribute('role', 'status'); notice.hidden = true;
@@ -31,7 +32,8 @@ document.body.append(notice);
 function toast(message) { notice.textContent = message; notice.hidden = false; clearTimeout(notice.timer); notice.timer = setTimeout(() => { notice.hidden = true; }, 6000); }
 function failure(error) { toast(api.friendlyError(error)); }
 function requireUser() {
-  if (api.state.profile) return true;
+  if (api.state.profile && api.state.user?.uid === api.auth.currentUser?.uid) return true;
+  if (!api.state.ready || api.state.user) { toast('Your account is still connecting. You can retry from Settings.'); return false; }
   location.assign(loginUrl()); return false;
 }
 function heading(title, description = '') { return `<header class="social-heading"><p class="social-eyebrow">COOLBRADOR / ${escape(title)}</p><h1>${escape(title)}</h1><p>${escape(description)}</p></header>`; }
@@ -54,7 +56,18 @@ function bindForm(form, handler) {
 }
 function composer(board = '', reply = null) {
   const container = document.createElement('section'); container.className = 'social-compose';
-  if (!api.state.profile) { container.innerHTML = `<p><a href="${loginUrl()}">Sign in</a> to ${reply ? 'reply' : 'share a post with the pack'}.</p>`; return container; }
+  if (!api.state.profile) {
+    container.innerHTML = (!api.state.ready || api.state.user)
+      ? '<p>Your account is loading. You can keep reading while it connects.</p>'
+      : `<p><a href="${loginUrl()}">Sign in</a> to ${reply ? 'reply' : 'share a post with the pack'}.</p>`;
+    if (api.state.error) {
+      container.innerHTML = '<p>Your account is signed in, but your profile could not load.</p>';
+      const retry = document.createElement('button'); retry.type = 'button'; retry.textContent = 'Retry account';
+      retry.onclick = async () => { retry.disabled = true; try { await api.restoreSession(); } catch (error) { failure(error); } finally { retry.disabled = false; } };
+      container.append(retry);
+    }
+    return container;
+  }
   const draftKey = `cb_draft_${api.state.user.uid}_${reply?.id || board || 'feed'}`;
   container.innerHTML = `<form><label class="social-compose-label">${reply ? 'Add a reply' : 'What’s happening in your world?'}<textarea name="body" maxlength="2000" rows="3" placeholder="${reply ? 'Keep the conversation going…' : 'A thought, a drawing, a moment from Chipper…'}" ${reply ? 'required' : ''}></textarea></label>
     <div class="social-attachment" hidden></div><div class="social-compose-tools">
@@ -255,10 +268,10 @@ async function feedPage(board) {
   root.innerHTML = heading(title, page==='gift'?'Share drawings, encouragement and thank-yous. This board does not take payments.':board === 'BeeSid' ? 'The Miiverse-style home for Chipper moments, drawings, and in-game discoveries.' : 'Small moments. Big conversations. A place for the whole pack.') +
     (page === 'home' || !board ? boardGrid() : '') +
     `<div id="composer"></div>${board === 'BeeSid' ? '<aside class="social-callout">🎮 Posts on this board are marked for Chipper. <a href="?archive=1">Explore the original game feed →</a></aside>' : ''}
-    <div class="social-feed-toolbar"><div role="tablist" aria-label="Feed"><button role="tab" data-feed="latest" aria-selected="true">Latest</button><button role="tab" data-feed="for-you" aria-selected="false" tabindex="-1">For you</button><button role="tab" data-feed="friends" aria-selected="false" tabindex="-1">Friends</button></div><label>Search posts<input id="feedSearch" type="search" placeholder="Find a conversation"></label></div><p class="social-muted"><span id="feedExplanation">Newest posts and reposts first.</span> <a href="/settings#feedPreferences">Choose your interests</a> · <a href="/safety.html#feed">How your feed works</a></p><section id="liveFeed" aria-label="Posts"><p>Loading posts…</p></section><button id="loadMore" class="social-load" hidden>Load more posts</button>`;
+    <div class="social-feed-toolbar"><div role="tablist" aria-label="Feed"><button role="tab" data-feed="latest" aria-selected="true">Latest</button><button role="tab" data-feed="for-you" aria-selected="false" tabindex="-1">For you</button><button data-auth-required role="tab" data-feed="friends" aria-selected="false" tabindex="-1">Friends</button></div><label>Search posts<input id="feedSearch" type="search" placeholder="Find a conversation"></label></div><p class="social-muted"><span id="feedExplanation">Newest posts and reposts first.</span> <a href="/settings#feedPreferences">Choose your interests</a> · <a href="/safety.html#feed">How your feed works</a></p><section id="liveFeed" aria-label="Posts"><p>Loading posts…</p></section><button id="loadMore" class="social-load" hidden>Load more posts</button>`;
   root.querySelector('#composer').append(composer(board)); renderFeed(board);
   if (page === 'home') { const grid=root.querySelector('.social-boards');grid.classList.add('is-carousel');root.querySelector('.social-heading').after(root.querySelector('#composer'));const browse=document.createElement('a');browse.href='/community.html';browse.textContent='Browse all communities →';grid.after(browse); }
-  if (page === 'community') {
+  if (page === 'community' && api.state.profile) {
     const create = document.createElement('details'); create.className = 'social-poll-compose';
     create.innerHTML = '<summary>＋ Start a community</summary><form class="social-compose"><label>Community name<input name="name" maxlength="48" required></label><label>Description<textarea name="description" maxlength="280" rows="2"></textarea></label><button type="submit" class="social-primary">Create community</button><p role="status"></p></form>';
     root.querySelector('.social-boards').after(create);
@@ -301,23 +314,25 @@ async function threadPage() {
       root.querySelector('#moreReplies').onclick = () => stopComments.more();
     }
   }, error => { root.querySelector('#threadPost').innerHTML = empty('Could not load post', api.friendlyError(error)); }));
-  disposers.push(() => stopComments?.());
+  disposers.push(() => { commentVersion++; stopComments?.(); });
 }
 async function peoplePage() {
+  const revision = bootRevision;
   root.innerHTML = heading('Find your pack', 'Real people, shared interests, and conversations that carry on.') + `<label class="social-search">Search people<input id="peopleSearch" type="search" placeholder="Search by display name"></label><div id="requests"></div><h2>Your friends</h2><div id="friendList" class="social-person-grid"></div><h2>Discover people</h2><div id="peopleList" class="social-person-grid"><p>Loading people…</p></div><button id="morePeople" class="social-load">Load more people</button><p class="social-muted">Search covers people loaded so far. Load more to explore further.</p><div id="blockedList"></div>`;
   let cursor, resolving = false; const resolved = new Set();
   async function loadPeople() {
     const button = root.querySelector('#morePeople'); button.disabled = true;
-    try { const result = await api.peoplePage(cursor); cursor = result.cursor;
+    try { const result = await api.peoplePage(cursor); if (revision !== bootRevision) return; cursor = result.cursor;
       const merged = new Map(people.map(p => [p.uid,p])); result.rows.forEach(p => merged.set(p.uid,p)); people = [...merged.values()];
       button.hidden = !result.hasMore; paint();
     } catch(error) { failure(error); } finally { button.disabled = false; }
   }
   root.querySelector('#morePeople').onclick = loadPeople;
   function paint() {
+    if (revision !== bootRevision) return;
     // Resolve all friends/requesters independently from discovery pagination.
     const ids = [...new Set([...friends.flatMap(f=>f.participants), ...blocks])].filter(id=>!resolved.has(id)&&!people.some(p=>p.uid===id));
-    if (ids.length && !resolving) { resolving=true; ids.forEach(id=>resolved.add(id)); Promise.all(ids.map(id=>api.profileByUid(id))).then(rows=>{ rows.filter(Boolean).forEach(p=>people.push(p)); resolving=false; paint(); }).catch(error=>{resolving=false;failure(error);}); }
+    if (ids.length && !resolving) { resolving=true; ids.forEach(id=>resolved.add(id)); Promise.all(ids.map(id=>api.profileByUid(id))).then(rows=>{ if (revision !== bootRevision) return; rows.filter(Boolean).forEach(p=>people.push(p)); resolving=false; paint(); }).catch(error=>{resolving=false;failure(error);}); }
 
     const query = root.querySelector('#peopleSearch').value.toLowerCase();
     const accepted = friends.filter(f => f.status === 'accepted').flatMap(f => f.participants);
@@ -346,11 +361,13 @@ async function peoplePage() {
   feedRender = paint; root.querySelector('#peopleSearch').oninput = paint; await loadPeople(); paint();
 }
 async function profilePage() {
+  const revision = bootRevision;
   const id = decodeURIComponent(location.pathname.split('/')[2] || api.state.profile?.id || '');
   const p = await api.profile(id);
+  if (revision !== bootRevision) return;
   if (!p) { root.innerHTML = heading('Profile') + empty('Profile not found', 'This profile may be an archived demo or its link may be incorrect.', '<a href="/friends.html">Discover people →</a>'); return; }
   const own = p.uid === api.state.user?.uid;
-  root.innerHTML = `<header class="social-profile">${avatar(p)}<div><p class="social-eyebrow">MEMBER OF THE PACK</p><h1>${escape(userName(p))}</h1><p class="social-bio">${escape(p.bio || 'A little corner of the Coolbrador cosmos.')}</p><small>Joined ${escape(timeLabel(p.createdAt))}</small></div></header><div class="social-actions">${own ? '<button id="editProfile">Edit profile</button><a href="/settings">Customize appearance</a>' : '<button id="profileFriend">Add friend</button><button id="profileMessage">Message</button><button id="profileBlock">Block</button>'}</div><div id="profileEditor"></div><h2>Posts</h2><p class="social-muted">Newest first · <a href="/safety.html#feed">How your feed works</a></p><section id="liveFeed"></section><button id="loadMore" class="social-load" hidden>Load more posts</button>`;
+  root.innerHTML = `<header class="social-profile">${avatar(p)}<div><p class="social-eyebrow">MEMBER OF THE PACK</p><h1>${escape(userName(p))}</h1><p class="social-bio">${escape(p.bio || 'A little corner of the Coolbrador cosmos.')}</p><small>Joined ${escape(timeLabel(p.createdAt))}</small></div></header><div class="social-actions" data-auth-required>${own ? '<button id="editProfile">Edit profile</button><a href="/settings">Customize appearance</a>' : '<button id="profileFriend">Add friend</button><button id="profileMessage">Message</button><button id="profileBlock">Block</button>'}</div><div id="profileEditor"></div><h2>Posts</h2><p class="social-muted">Newest first · <a href="/safety.html#feed">How your feed works</a></p><section id="liveFeed"></section><button id="loadMore" class="social-load" hidden>Load more posts</button>`;
   renderFeed(undefined, p.uid);
   if (own) root.querySelector('#editProfile').onclick = () => {
     const editor = root.querySelector('#profileEditor');
@@ -443,7 +460,7 @@ async function notificationsPage() {
   disposers.push(stopNotifications); root.querySelector('#moreNotifications').onclick=()=>stopNotifications.more();
 }
 async function pollsPage() {
-  root.innerHTML = heading('The pack decides', 'Ask a question. Cast a vote. Watch the conversation take shape.') + `<details class="social-poll-compose"><summary>＋ Create a poll</summary><form class="social-compose"><label>Question<input name="title" maxlength="180" required placeholder="What should we explore next?"></label><label>Choices, one per line<textarea name="choices" rows="3" required placeholder="A new Chipper world&#10;A community drawing night"></textarea></label><label>Community<select name="board">${options('General')}</select></label><button type="submit" class="social-primary">Create poll</button><p role="status"></p></form></details><div id="pollList"><p>Loading polls…</p></div><button id="morePolls" class="social-load" hidden>Load older polls</button>`;
+  root.innerHTML = heading('The pack decides', 'Ask a question. Cast a vote. Watch the conversation take shape.') + `<details class="social-poll-compose" data-auth-required><summary>＋ Create a poll</summary><form class="social-compose"><label>Question<input name="title" maxlength="180" required placeholder="What should we explore next?"></label><label>Choices, one per line<textarea name="choices" rows="3" required placeholder="A new Chipper world&#10;A community drawing night"></textarea></label><label>Community<select name="board">${options('General')}</select></label><button type="submit" class="social-primary">Create poll</button><p role="status"></p></form></details><div id="pollList"><p>Loading polls…</p></div><button id="morePolls" class="social-load" hidden>Load older polls</button>`;
   const form = root.querySelector('form'); bindForm(form, async data => {
     await api.createPoll(data.get('title'), String(data.get('choices')).split('\n').map(v => v.trim()).filter(Boolean), data.get('board'));
     form.reset(); root.querySelector('details').open = false; toast('Poll created.');
@@ -485,9 +502,11 @@ async function pollsPage() {
   disposers.push(stopPolls); root.querySelector('#morePolls').onclick=()=>stopPolls.more();
 }
 async function archivePage() {
+  const revision = bootRevision;
   const board = decodeURIComponent(location.pathname.split('/')[2] || 'BeeSid');
   const response = await fetch('/data/community-archive.json'); if (!response.ok) throw new Error('The game archive is temporarily unavailable.');
   const data = await response.json();
+  if (revision !== bootRevision) return;
   const all = data[board] || [];
   root.innerHTML = heading(board === 'BeeSid' ? 'Chipper game archive' : board + ' archive', 'Original Miiverse-style posts, preserved for the game. New conversations happen on the live BeeSid board.') + '<a class="social-primary" href="/b/BeeSid">Join the live board →</a><section id="archivePosts"></section>';
   const route = location.pathname.match(/\/post\/(\d+)\/comments/);
@@ -498,6 +517,7 @@ async function archivePage() {
   host.innerHTML = selected.map(p => `<article class="social-post"><header class="social-post-head"><strong>${escape(p.username || p.author || 'Chipper player')}</strong><span class="social-board-tag">Chipper archive</span></header><p class="social-post-text">${escape(p.text || p.body)}</p>${(Array.isArray(p.media) ? p.media : [p.media]).map(mediaHTML).join('')}<p class="social-muted">${Array.isArray(p.yeahs) ? p.yeahs.length : Number(p.yeahs) || 0} Yeah! · ${escape(timeLabel(p.timestamp))}</p></article>`).join('');
 }
 async function searchPage() {
+  const revision = bootRevision;
   const term=new URLSearchParams(location.search).get('q')||'';
   root.innerHTML=heading('Search the pack','Find public posts and people. Use complete words; multiple words narrow the results.')+`<form id="publicSearch" class="social-compose" action="/search"><label>Search<input name="q" type="search" value="${escape(term)}" required minlength="2" maxlength="120"></label><button type="submit" class="social-primary">Search</button></form><div id="searchPeople"></div><div id="searchPosts"></div>`;
   if(!term.trim())return;
@@ -505,33 +525,48 @@ async function searchPage() {
     const section=root.querySelector('#'+id);section.innerHTML=`<h2>${title}</h2><div class="search-results"></div><button class="social-load">Load more ${title.toLowerCase()}</button><p role="status"></p>`;
     const host=section.querySelector('.search-results'),button=section.querySelector('button');let cursor,found=0;
     async function load(){button.disabled=true;section.querySelector('[role=status]').textContent='Searching…';
-      try{const result=await api.searchPublic(kind,term,cursor);cursor=result.cursor;found+=result.rows.length;
+      try{const result=await api.searchPublic(kind,term,cursor);if(revision!==bootRevision)return;cursor=result.cursor;found+=result.rows.length;
         for(const item of result.rows){if(kind==='posts')host.append(postCard(item));else{const card=document.createElement('article');card.className='social-person';card.innerHTML=`<a class="social-author" href="${profileUrl(item.id)}">${avatar(item)}<strong>${escape(userName(item))}</strong></a><p>${escape(item.bio)}</p>`;host.append(card);}}
         button.hidden=!result.hasMore;section.querySelector('[role=status]').textContent=found?`${found} ${title.toLowerCase()} found${result.hasMore?'; more results available.':'.'}`:result.hasMore?'No matches in this page. Load more to keep searching.':'No matching '+title.toLowerCase()+'.';
       }catch(error){section.querySelector('[role=status]').textContent=api.friendlyError(error);}finally{button.disabled=false;}
     }
-    button.onclick=load;await load();
+    button.onclick=load;await load();if(revision!==bootRevision)return;
   }
 }
 async function moderationPage() { await mountStaffPanel(root); }
 
 function wireKeyboardTabs() {
+  if (root.dataset.keyboardTabs) return;
+  root.dataset.keyboardTabs = '1';
   root.addEventListener('keydown', e => {
     const tab = e.target.closest('[role=tab]'); if (!tab || !['ArrowLeft','ArrowRight','Home','End'].includes(e.key)) return;
-    const tabs = [...tab.closest('[role=tablist]').querySelectorAll('[role=tab]')];
+    const tabs = [...tab.closest('[role=tablist]').querySelectorAll('[role=tab]')].filter(el => el.getClientRects().length);
     let i = tabs.indexOf(tab); i = e.key === 'Home' ? 0 : e.key === 'End' ? tabs.length-1 : (i + (e.key === 'ArrowRight' ? 1 : -1) + tabs.length)%tabs.length;
     e.preventDefault(); tabs[i].click(); tabs[i].focus();
   });
 }
 async function boot() {
-  if (booted) return; booted = true;
-  if (api.state.error) { root.innerHTML = empty('Could not connect to your account', api.friendlyError(api.state.error), '<button onclick="location.reload()">Try again</button>'); return; }
+  const revision = ++bootRevision;
+  disposers.splice(0).forEach(fn => fn()); disposeCards();
+  friends = []; blocks = []; people = []; feedRender = () => {};
+  if (api.state.error && !publicPages.has(page)) {
+    root.innerHTML = empty('Your account could not load', 'You are still signed in. Retry to reconnect your account.', '<button id="retryAccount">Try again</button>');
+    root.querySelector('#retryAccount').onclick = async event => {
+      event.target.disabled = true;
+      try { await api.restoreSession(); } catch (error) { failure(error); }
+      finally { event.target.disabled = false; }
+    };
+    return;
+  }
+  if (!publicPages.has(page) && !api.state.profile) { gate(); return; }
   if (api.state.profile) {
     disposers.push(api.watchFriends(rows => { friends = rows; feedRender(); }, failure));
     disposers.push(api.watchBlocks(rows => { blocks = rows; feedRender(); }, failure));
   }
   try {
-    await api.loadBoards();
+    // A direct public post link must not depend on account or board discovery.
+    if (!['post', 'archive'].includes(page)) await api.loadBoards();
+    if (revision !== bootRevision) return;
     if (page === 'home' || page === 'community') await feedPage();
     else if (page === 'board') {
       const requested = decodeURIComponent(location.pathname.split('/')[2] || 'General');
@@ -549,9 +584,23 @@ async function boot() {
     else if (page === 'polls') await pollsPage();
     else if (page === 'archive') await archivePage();
     else if (page === 'moderation') await moderationPage();
-  } catch (error) { root.innerHTML = empty('Could not load this page', api.friendlyError(error), '<button onclick="location.reload()">Try again</button>'); }
+  } catch (error) { if (revision !== bootRevision) return; root.innerHTML = empty('Could not load this page', api.friendlyError(error), '<button onclick="location.reload()">Try again</button>'); }
   wireKeyboardTabs();
 }
-await api.ready; boot();
+// Public reads start immediately. Auth/profile restoration only enables account
+// controls; neither a slow profile request nor a failed one gates a public post.
+let renderedAccount = '';
+function accountKey() { return [api.state.user?.uid || '', api.state.profile?.id || '', !!api.state.error, api.state.ready].join(':'); }
+if (publicPages.has(page)) {
+  renderedAccount = accountKey(); boot();
+} else {
+  await api.ready;
+  renderedAccount = accountKey(); boot();
+}
+api.watchAuth(() => {
+  const next = accountKey();
+  if (next !== renderedAccount) { renderedAccount = next; boot(); }
+});
+window.addEventListener('pageshow', event => { if (event.persisted) location.reload(); });
 window.addEventListener('pagehide', () => { disposers.forEach(fn => fn()); disposeCards(); });
 document.addEventListener('error', e => { if (e.target instanceof HTMLImageElement && !e.target.dataset.fallback) { e.target.dataset.fallback = '1'; e.target.src = '/users/default/pfp.jpg'; } }, true);

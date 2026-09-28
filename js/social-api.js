@@ -1,4 +1,5 @@
 // Shared social data. Firebase Auth is the authority; browser storage is only a UI cache.
+import { createAuthSession } from './auth-session.mjs';
 import { searchWords, searchTokens } from './search-utils.mjs';
 import { auth, db, getStorageInstance } from './firebase.js';
 import { onAuthStateChanged, updateProfile, signOut } from 'https://www.gstatic.com/firebasejs/10.14.1/firebase-auth.js';
@@ -9,16 +10,12 @@ import { collection, doc, getDoc, getDocs, setDoc, updateDoc, deleteDoc, addDoc,
 export { auth };
 export const BOARDS = ['General', 'BeeSid', 'Starry', 'ChipperCorner', 'Labradoria', 'MutinyDesk', 'GiftDrive', 'FarmReport', 'FarmDESTROYERSCLUB', 'Invasions', 'Mutinies4Lyfe', 'testboard'];
 export const boardInfo = new Map();
-export const state = { user: null, profile: null, ready: false };
-const listeners = new Set();
 const profiles = new Map();
-let resolveReady;
-export const ready = new Promise(resolve => { resolveReady = resolve; });
 export const timestamp = value => value?.toMillis?.() || (typeof value === 'number' ? value : Date.parse(value)) || 0;
 export const pairId = (a, b) => [a, b].sort().join('__');
 const row = snapshot => ({ ...snapshot.data(), id: snapshot.id });
 function signedIn() {
-  if (!auth.currentUser || !state.profile) throw new Error('Sign in to continue.');
+  if (!auth.currentUser || !state.profile || state.user?.uid !== auth.currentUser.uid) throw new Error('Sign in to continue.');
   return auth.currentUser.uid;
 }
 function text(value, max, label) {
@@ -39,7 +36,7 @@ export async function ensureProfile(user, displayName) {
     profiles.set(profile.id, profile);
     return profile;
   }
-  const profile = { uid: user.uid, displayName: text(displayName || user.displayName || 'New Labrador', 48, 'Display name'),
+  const profile = { uid: user.uid, displayName: text(String(displayName || user.displayName || 'New Labrador').trim().slice(0, 48) || 'New Labrador', 48, 'Display name'),
     bio: '', avatarUrl: '/users/default/pfp.jpg', createdAt: serverTimestamp(), searchTokens:searchTokens(displayName || user.displayName || 'New Labrador') };
   await runTransaction(db, async tx => {
     const ref = doc(db, 'profiles', user.uid);
@@ -56,34 +53,44 @@ function cacheProfile(profile) {
     localStorage.setItem('pfp_' + id, profile.avatarUrl || '/users/default/pfp.jpg');
   } catch (_) { /* Storage full/private mode must not block a real session. */ }
 }
-onAuthStateChanged(auth, async user => {
-  state.user = user;
-  state.profile = null;
-  state.error = null;
-  try {
-    if (user) {
-      const profile = await ensureProfile(user);
-      if (auth.currentUser?.uid !== user.uid) return;
-      state.profile = profile;
-      cacheProfile(profile);
-      try {
-        localStorage.setItem('loggedIn', 'true');
-        localStorage.setItem('currentUserId', profile.id);
-        localStorage.setItem('firebaseUid', user.uid);
-      } catch (_) { /* A cache failure cannot invalidate an authenticated account. */ }
-    } else {
-      try {
-        for (const key of ['loggedIn', 'currentUserId', 'firebaseUid']) localStorage.removeItem(key);
-        sessionStorage.removeItem('cb_auth_chrome_v2');
-      } catch (_) {}
-    }
-  } catch (error) { state.error = error; }
-  state.ready = true;
-  resolveReady(state);
-  listeners.forEach(fn => fn(state));
-  window.dispatchEvent(new CustomEvent('cb-social-auth', { detail: state }));
+const session = createAuthSession({
+  currentUser: () => auth.currentUser,
+  loadProfile: ensureProfile,
+  cacheProfile(profile, user) {
+    cacheProfile(profile);
+    // Keep both IDs together so a cached profile from another account is never
+    // used when restoring navigation. These hints grant no data access.
+    try {
+      localStorage.setItem('currentUserId', profile.id);
+      localStorage.setItem('firebaseUid', user.uid);
+      localStorage.setItem('loggedIn', 'true');
+    } catch (_) {}
+  },
+  clearCache() {
+    try {
+      for (const key of ['loggedIn', 'currentUserId', 'firebaseUid']) localStorage.removeItem(key);
+      sessionStorage.removeItem('cb_auth_chrome_v2');
+    } catch (_) {}
+  },
+  changed: state => window.dispatchEvent(new CustomEvent('cb-social-auth', { detail: state }))
 });
-export function watchAuth(fn) { listeners.add(fn); if (state.ready) fn(state); return () => listeners.delete(fn); }
+export const { state, ready } = session;
+export const watchAuth = session.watch;
+export async function restoreSession(user = auth.currentUser) {
+  await session.restore(user);
+  if (auth.currentUser?.uid !== user?.uid) throw new Error('Your account changed. Please sign in again.');
+  if (state.error) throw state.error;
+  return state.profile;
+}
+onAuthStateChanged(auth, user => {
+  try {
+    if (user && localStorage.getItem('firebaseUid') !== user.uid) {
+      for (const key of ['loggedIn', 'currentUserId', 'firebaseUid']) localStorage.removeItem(key);
+      sessionStorage.removeItem('cb_auth_chrome_v2');
+    }
+  } catch (_) {}
+  session.restore(user);
+});
 export async function logout() { await signOut(auth); }
 export async function profile(id) {
   if (profiles.has(id)) return profiles.get(id);
@@ -119,7 +126,7 @@ export async function saveProfile(fields) {
   state.profile = { ...state.profile, ...value };
   cacheProfile(state.profile);
   await updateProfile(auth.currentUser, { displayName: value.displayName, photoURL: value.avatarUrl || state.profile.avatarUrl });
-  listeners.forEach(fn => fn(state));
+  session.notify();
 }
 export async function upload(file) {
   const uid = signedIn();

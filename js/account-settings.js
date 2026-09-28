@@ -1,10 +1,10 @@
-import { auth, watchAuth, logout, friendlyError } from './social-api.js';
+import { auth, watchAuth, logout, restoreSession, friendlyError } from './social-api.js';
 import { EmailAuthProvider, reauthenticateWithCredential, updatePassword, verifyBeforeUpdateEmail,
   sendEmailVerification, reload, getMultiFactorResolver, RecaptchaVerifier, PhoneAuthProvider, PhoneMultiFactorGenerator
 } from 'https://www.gstatic.com/firebasejs/10.14.1/firebase-auth.js';
 const host = document.querySelector('#accountSettings');
 const escape = v => String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-let renderedUid = null;
+let renderedAccount = '';
 const errors = {
   'auth/invalid-credential':'Your current password is incorrect.', 'auth/wrong-password':'Your current password is incorrect.',
   'auth/weak-password':'Use at least eight characters for your new password.',
@@ -37,8 +37,20 @@ function bind(form, work) {
   };
 }
 watchAuth(state => {
-  if (state.user?.uid === renderedUid) return;
-  renderedUid=state.user?.uid;
+  const key = [state.user?.uid || '', state.profile?.id || '', !!state.error].join(':');
+  if (key === renderedAccount) return;
+  renderedAccount = key;
+  if (state.user && !state.profile) {
+    host.innerHTML = '<h2>Your account</h2><p>You are signed in, but your profile could not load.</p><div class="account-actions"><button id="retryAccount">Retry account</button><button id="accountLogout">Log out</button></div><p role="status"></p>';
+    const status = host.querySelector('[role=status]');
+    host.querySelector('#retryAccount').onclick = async event => {
+      event.target.disabled = true;
+      try { await restoreSession(); } catch (error) { status.textContent = friendlyError(error); }
+      finally { event.target.disabled = false; }
+    };
+    host.querySelector('#accountLogout').onclick = () => logout().then(() => location.assign('/')).catch(error => { status.textContent = friendlyError(error); });
+    return;
+  }
   if(!state.profile) {host.innerHTML='<h2>Your account</h2><p><a href="/login.html?next=/settings">Sign in to manage your account.</a></p>';return;}
   const user=state.user, profileId=state.profile.id;
   host.innerHTML=`<h2>Your account</h2><p class="account-email">${escape(user.email)}</p><p id="emailVerification">${user.emailVerified?'Email verified':'Your email has not been verified.'}</p><div class="account-actions"><button id="verifyEmail" ${user.emailVerified?'hidden':''}>Send verification email</button><button id="refreshVerification">Check verification</button><button id="accountLogout">Log out</button></div><p id="accountStatus" role="status"></p>

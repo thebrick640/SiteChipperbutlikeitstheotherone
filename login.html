@@ -9,17 +9,20 @@
   <main class="social-auth">
     <a class="social-brand" href="/">Coolbrador<span>Find your pack.</span></a>
     <h1 id="authTitle">Welcome back</h1><p id="authIntro">Your communities, your friends, your corner of the cosmos.</p>
-    <form id="authForm">
+    <form id="authForm" method="post">
+      <fieldset id="authFields" disabled>
       <label id="nameField" hidden>Display name<input name="displayName" autocomplete="nickname" maxlength="48"></label>
       <label>Email<input name="email" type="email" autocomplete="email" required></label>
       <label>Password<input name="password" type="password" autocomplete="current-password" minlength="1" required></label>
       <button class="social-primary" id="authSubmit">Sign in</button>
+      </fieldset>
     </form>
-    <p id="authStatus" role="status" aria-live="polite"></p>
-    <div class="social-actions"><button type="button" id="authToggle">Create an account</button><button type="button" id="passwordReset">Forgot password?</button></div>
+    <p id="authStatus" role="status" aria-live="polite">Loading sign-in…</p>
+    <noscript>Enable JavaScript to sign in. You can return to the community using the link below.</noscript>
+    <div class="social-actions"><button type="button" id="authToggle" disabled>Create an account</button><button type="button" id="passwordReset" disabled>Forgot password?</button></div>
     <p><a href="/community.html">Explore the community first →</a></p>
     <p>Posts and profiles are public. Read our <a href="/safety.html">community rules</a> and <a href="/privacy.html">data &amp; privacy information</a> before joining.</p><div id="recaptcha-container"></div>
   </main>
-  <script type="module" src="/js/social-auth.js"></script>
+  <script src="/js/login-boot.js"></script>
 </body>
 </html>

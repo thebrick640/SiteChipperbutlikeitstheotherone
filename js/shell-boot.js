@@ -6,7 +6,7 @@
       return;
     }
     var FLAGS = "cb_shell_flags_v1";
-    var SHELL = "cb_shell_html_v4";
+    var SHELL = "cb_shell_html_v5";
     var COLLAPSE = "cbSidebarCollapsed";
 
     var flags = null;
@@ -34,7 +34,6 @@
       document.documentElement.classList.add("cb-shell-sidebar");
       var collapsed = false;
       try { collapsed = localStorage.getItem(COLLAPSE) === "1"; } catch (_) {}
-      if (flags && typeof flags.sidebarCollapsed === "boolean") collapsed = !!flags.sidebarCollapsed;
       body.classList.toggle("cb-sidebar-collapsed", !!collapsed);
       document.documentElement.classList.toggle("cb-shell-collapsed", !!collapsed);
     }

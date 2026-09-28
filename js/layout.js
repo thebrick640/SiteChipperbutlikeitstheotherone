@@ -2,6 +2,13 @@
  * Shared layout loader for Coolbrador pages.
  */
 (function () {
+  window.addEventListener('error', function (event) {
+    if (!(event.target instanceof HTMLScriptElement) || !event.target.src.endsWith('/js/social.js')) return;
+    const root = document.getElementById('socialRoot');
+    if (!root) return;
+    root.innerHTML = '<p role="alert">The community could not connect. Check your connection and try again.</p><button type="button">Try again</button>';
+    root.querySelector('button').onclick = function () { location.reload(); };
+  }, true);
   // Apply palette + light/dark + rice ASAP (uses CoolbradorRice when loaded)
   (function applyThemeEarly() {
     try {
@@ -92,7 +99,7 @@
 
   function sharedPath(file) { return "/shared/" + file; }
 
-  var SHELL_CACHE_KEY = "cb_shell_html_v4";
+  var SHELL_CACHE_KEY = "cb_shell_html_v5";
   var SHELL_FLAGS_KEY = "cb_shell_flags_v1";
 
   function readShellCache() {
@@ -156,7 +163,6 @@
       document.body.classList.add("has-cb-sidebar");
       var collapsed = false;
       try { collapsed = localStorage.getItem(SIDEBAR_COLLAPSE_KEY) === "1"; } catch (_) {}
-      if (flags && typeof flags.sidebarCollapsed === "boolean") collapsed = !!flags.sidebarCollapsed;
       document.body.classList.toggle("cb-sidebar-collapsed", !!collapsed);
     }
   }
@@ -268,7 +274,7 @@
     if (!c) return false;
     // Stale chrome cache alone must not fake a login after sign-out.
     try {
-      if (localStorage.getItem("loggedIn") !== "true") {
+      if (!getLocalUser() || c.userId !== localStorage.getItem("currentUserId")) {
         if (c.signedIn) clearAuthChromeCache();
         return false;
       }
@@ -348,7 +354,9 @@
       if(localStorage.getItem('loggedIn')!=='true')return null;
       const id=sanitizePublicUserId(localStorage.getItem('currentUserId'));if(!id)return null;
       const user=JSON.parse(localStorage.getItem('user_'+id)||'{}'),profile=JSON.parse(localStorage.getItem('profile_'+id)||'{}');
-      if(!user.uid&&!profile.uid)return null;
+      const uid = localStorage.getItem('firebaseUid');
+      const confirmed = window.CoolbradorAuth?.currentUser || window.CoolbradorSocial?.state.user;
+      if (!uid || (profile.uid || user.uid) !== uid || (confirmed && confirmed.uid !== uid)) return null;
       return {id,username:profile.displayName||user.displayName||user.username||'Labrador',pfp:profile.avatar||user.profilePicture||'/users/default/pfp.jpg',profileUrl:'/users/'+encodeURIComponent(id)};
     }catch(_){return null;}
   }
@@ -359,7 +367,10 @@
 
   function syncSignedOutChrome() {
     try {
-      var out = !isSignedIn();
+      // Cached chrome is a rendering hint while Auth restores, never permission.
+      var state = window.CoolbradorSocial?.state;
+      var knownUser = state?.user || window.CoolbradorAuth?.currentUser;
+      var out = state?.ready ? !knownUser : !(knownUser || getLocalUser());
       document.body.classList.toggle("cb-signed-out", out);
       document.body.classList.toggle("cb-signed-in", !out);
     } catch (_) {}
@@ -483,7 +494,7 @@
         '<div class="cb-user-menu">' +
         '<button type="button" class="cb-user-menu-btn" data-cb-user-menu aria-haspopup="true" aria-expanded="false" title="' + escapeHtml(name) + '">' +
         '<span class="cb-user-menu-name">' + escapeHtml(name) + "</span>" +
-        '<img src="' + pfp + '" alt="" class="cb-user-menu-pfp">' +
+        '<img src="' + escapeHtml(pfp) + '" alt="" class="cb-user-menu-pfp">' +
         "</button>" +
         '<div class="cb-user-menu-panel" hidden role="menu">' +
         '<a role="menuitem" href="' + profileUrl + '"><i class="fa-solid fa-user" aria-hidden="true"></i><span>Profile</span></a>' +
@@ -497,7 +508,7 @@
       mob.innerHTML =
         '<div class="cb-user-menu cb-user-menu-mobile">' +
         '<button type="button" class="cb-user-menu-btn" data-cb-user-menu aria-haspopup="true" aria-expanded="false">' +
-        '<img src="' + pfp + '" alt="' + escapeHtml(name) + '" class="cb-user-menu-pfp">' +
+        '<img src="' + escapeHtml(pfp) + '" alt="' + escapeHtml(name) + '" class="cb-user-menu-pfp">' +
         "</button>" +
         '<div class="cb-user-menu-panel" hidden role="menu">' +
         '<a role="menuitem" href="' + profileUrl + '"><i class="fa-solid fa-user" aria-hidden="true"></i><span>Profile</span></a>' +
@@ -655,7 +666,10 @@
     return { id: rid, name: name, handle: handle, pfp: pfp };
   }
 
-  function hasLocalSession() { return !!window.CoolbradorSocial?.state.profile && !!window.CoolbradorAuth?.currentUser; }
+  function hasLocalSession() {
+    const state = window.CoolbradorSocial?.state;
+    return !!state?.profile && state.user?.uid === window.CoolbradorAuth?.currentUser?.uid;
+  }
   function isSignedIn() { return hasLocalSession(); }
   function getSessionUserId() { return window.CoolbradorSocial?.state.profile?.id || ''; }
 
@@ -679,7 +693,11 @@
         const { signOut } = await import("https://www.gstatic.com/firebasejs/10.14.1/firebase-auth.js");
         await signOut(auth);
       }
-    } catch (_) {}
+    } catch (error) {
+      console.error('Could not sign out', error);
+      alert('Could not sign out. Please try again.');
+      return;
+    }
     clearLocalSession();
     clearAuthChromeCache();
     authReady = true;
@@ -794,7 +812,7 @@
           else if (cache && cache.pfp) sidePfp = cache.pfp;
         } catch (_) {}
         userEl.innerHTML =
-          '<button type="button" class="cb-sidebar-account-toggle"><span class="cb-sidebar-user-name">' + escapeHtml(name) + "</span>" +
+          '<button type="button" class="cb-sidebar-account-toggle" aria-label="' + escapeHtml('Account menu for ' + name) + '"><span class="cb-sidebar-user-name">' + escapeHtml(name) + "</span>" +
           '<img class="cb-sidebar-user-pfp" src="' + String(sidePfp).replace(/"/g, "") + '" alt="">' +
           '<span class="cb-sidebar-user-initials" aria-hidden="true">' + escapeHtml(initialsFromName(name)) + "</span></button>";
         wireSidebarUserMenu(userEl, url, name);
@@ -885,6 +903,7 @@
 
   function setSidebarCollapsed(collapsed) {
     document.body.classList.toggle("cb-sidebar-collapsed", collapsed);
+    document.documentElement.classList.toggle("cb-shell-collapsed", collapsed);
     try { localStorage.setItem(SIDEBAR_COLLAPSE_KEY, collapsed ? "1" : "0"); } catch (_) {}
     const btn = document.getElementById("cbSidebarCollapse");
     if (btn) {
@@ -1351,10 +1370,19 @@ function wireRightRail() {
         if (state.profile && state.user) {
           renderSignedInChrome({ id: state.profile.id, username: state.profile.displayName,
             pfp: state.profile.avatarUrl || '/users/default/pfp.jpg', profileUrl: '/users/' + encodeURIComponent(state.profile.id) });
-        } else { clearLocalSession(); renderLoginLinks(); }
-        if (socialBadgeUid !== state.user?.uid) {
+        } else if (!state.user) {
+          clearLocalSession(); renderLoginLinks();
+        } else {
+          // A failed profile request is not a Firebase sign-out.
+          const cached = getLocalUser();
+          if (cached && localStorage.getItem('firebaseUid') === state.user.uid) renderLocalProfile(cached);
+          else renderSignedInChrome({ id: '', username: state.user.displayName || 'Account',
+            pfp: state.user.photoURL || '/users/default/pfp.jpg', profileUrl: '/settings' }, true);
+        }
+        const badgeUid = state.profile && state.user ? state.user.uid : null;
+        if (socialBadgeUid !== badgeUid) {
           socialBadgeStops.forEach(stop => stop()); socialBadgeStops = [];
-          socialBadgeUid = state.user?.uid;
+          socialBadgeUid = badgeUid;
           liveBadge('notifications', 0); liveBadge('friends', 0); liveBadge('messages', 0);
           if (state.profile && state.user) {
             socialBadgeStops.push(api.watchUnreadNotifications(count => liveBadge('notifications', count, 'Unread notifications'), () => {}));
@@ -1369,7 +1397,10 @@ function wireRightRail() {
         window.dispatchEvent(new CustomEvent('cb-auth-changed', { detail: { signedIn: !!state.profile, userId: state.profile?.id || '' } }));
       });
     } catch (error) {
-      clearLocalSession(); renderLoginLinks(); markAuthReady();
+      // Offline/module failures must not erase a persisted account hint.
+      const cached = getLocalUser();
+      if (cached) renderLocalProfile(cached); else renderLoginLinks();
+      markAuthReady();
       console.error('Could not restore session', error);
     }
   }
@@ -1569,6 +1600,7 @@ function sectionIcon(section) {
     applySiteTheme();
     applyShareSoloChrome();
     reserveShellSpace();
+    syncSignedOutChrome();
     paintShellFromCache();
     // Auth chrome + sidebar wiring from cache before network, so middle content stays put.
     try { ensureSessionNotDemo(); } catch (_) {}
@@ -1587,9 +1619,9 @@ function sectionIcon(section) {
     var fetchedFooter = null;
     if (headerHost) {
       jobs.push(
-        fetch(sharedPath("header.html")).then((r) => r.text()).then((html) => {
+        fetch(sharedPath("header.html")).then((r) => { if (!r.ok) throw new Error("Header unavailable"); return r.text(); }).then((html) => {
           fetchedHeader = html;
-          headerHost.innerHTML = html;
+          if (!headerHost.querySelector('#cbSidebar')) headerHost.innerHTML = html;
           headerHost.setAttribute("data-cb-shell", "live");
         }).catch((err) => console.error("Header load failed", err))
       );
@@ -1626,7 +1658,14 @@ function sectionIcon(section) {
 
     await updateUserProfile();
     wireAllSearch();
-    window.addEventListener("storage", updateUserProfile);
+    window.addEventListener("storage", function (event) {
+      if (event.key === 'loggedIn' && event.newValue !== 'true') {
+        clearAuthChromeCache();
+        document.body.classList.remove('cb-signed-in');
+        document.body.classList.add('cb-signed-out');
+        closeAllUserMenus(); closeSidebarUserMenu();
+      }
+    });
   }
 
   window.CoolbradorSession = { isSignedIn, hasLocalSession, getSessionUserId, requireSignedIn, signOut: signOutFully, whenAuthReady, ensureSessionNotDemo, isDemoAccountId, get authReady() { return authReady; }, get authLoading() { return authLoading; } };
@@ -1693,7 +1732,17 @@ function sectionIcon(section) {
   try {
     applyShareSoloChrome();
     reserveShellSpace();
-    if (!document.body.classList.contains("cb-share-solo")) paintShellFromCache();
+    syncSignedOutChrome();
+    if (!document.body.classList.contains("cb-share-solo")) {
+      paintShellFromCache();
+      if (document.getElementById('cbSidebar')) {
+        if (!paintAuthChromeFromCache()) {
+          const local = getLocalUser();
+          if (local) renderLocalProfile(local); else renderLoginLinks(true);
+        }
+        wireSidebar();
+      }
+    }
   } catch (_) {}
 
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", loadLayout);
